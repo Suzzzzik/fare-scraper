@@ -1,0 +1,865 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wyszukiwarka tanich lotów — Ryanair, Wizz Air i inne linie</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #fff;
+    --border: #dfe3e8;
+    --text: #12151a;
+    --muted: #6b7280;
+    --accent: #1e5eff;
+    --ryanair: #0a3d91;
+    --wizzair: #c6007e;
+    --ok: #067647;
+    --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --border: #2a2f3a;
+      --text: #e8eaed; --muted: #9aa3af; --accent: #6f9bff;
+      --ryanair: #6f9bff; --wizzair: #ff5fc0; --ok: #4ade80; --warn: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }   /* .check sets display:flex */
+  body {
+    margin: 0; padding: 24px 16px 64px;
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 21px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px;
+  }
+  .grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+  select, input[type=date], input[type=number], input[type=text] {
+    width: 100%; padding: 8px 10px; font: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  }
+  select[multiple] { height: 132px; }
+  .span-all { grid-column: 1 / -1; }
+  body.oneway .ret { display: none; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .split { color: var(--muted); font-weight: 400; font-size: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin-top: 16px; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+  button {
+    padding: 10px 20px; font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  button.ghost {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+    font-weight: 500;
+  }
+  #status { margin-top: 16px; font-size: 13px; color: var(--muted); min-height: 20px; }
+  .bar { height: 4px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .warns { margin-top: 8px; font-size: 12px; color: var(--warn); }
+  .warns div { white-space: pre-wrap; word-break: break-word; }
+  .results { margin-top: 22px; }
+  .tools { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 10px; }
+  .tools input { max-width: 240px; }
+  .scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; background: var(--panel); }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--panel); white-space: nowrap; }
+  /* price + actions pinned to the right edge so the fare is always on screen,
+     however narrow the window is */
+  th.pricecol, td.pricecol {
+    position: sticky; right: 0; background: var(--panel); text-align: right;
+    box-shadow: -8px 0 8px -8px rgba(0,0,0,.45);
+  }
+  th.pricecol { z-index: 2; }
+  td.nowrapcell { white-space: nowrap; }
+  .sub2 { font-size: 11.5px; color: var(--muted); margin-top: 2px;
+          max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .linklike { background: none; border: 0; color: var(--accent); font: inherit;
+              font-size: 13px; padding: 0 0 0 8px; cursor: pointer; }
+  /* the panel sits in a <tr> right under its flight. Two things keep the table's
+     auto-layout from reacting to it: the cell spans every column, and the panel
+     is width-contained so its min-content never widens a column. */
+  .staysrow > td {
+    padding: 0; background: var(--bg);
+    border-left: 3px solid var(--accent);
+  }
+  .stays { padding: 16px 18px; contain: inline-size; }
+  .frow.open > td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .frow.open > td.pricecol { background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
+  .stays-btn.active { color: var(--text); font-weight: 600; text-decoration: underline; }
+  .stays h4 { margin: 0 0 12px; font-size: 14px; }
+  .stays section { margin-bottom: 14px; }
+  .stays .sectlabel { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                       letter-spacing: .04em; margin-bottom: 7px; }
+  .stays .field-grid {
+    display: grid; gap: 10px; margin-bottom: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  }
+  .stays .field-grid > div { display: flex; flex-direction: column; }
+  .stays .field-grid input, .stays .field-grid select { width: 100%; }
+  .chiprow { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 5px 12px 5px 10px; font-size: 13px; cursor: pointer;
+    background: var(--bg); user-select: none;
+  }
+  .chip input { margin: 0; width: auto; accent-color: var(--accent); }
+  .chip:has(input:checked) {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  .chip:has(input:checked) .srcs { color: rgba(255,255,255,.75); }
+
+  /* airport pickers: a scrollable chip list beats <select multiple>, which
+     needs ctrl/cmd-click to multi-select and shows no hint that it does */
+  .airports {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
+    padding: 8px; max-height: 148px; overflow-y: auto;
+  }
+  .airports .chip { font-size: 12.5px; padding: 4px 10px 4px 8px; }
+  .airports .chip .code { font-weight: 700; }
+  .airports .chip .nm { color: var(--muted); }
+  .airports .chip:has(input:checked) .nm { color: rgba(255,255,255,.75); }
+  .pickhead {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 4px;
+  }
+  .pickhead .picksum { font-size: 12px; color: var(--muted); }
+  .pickhead .linklike { font-size: 12px; }
+  .stays .actionrow { display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+  .stays .big { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  .stays .big a { display: inline-block; padding: 8px 14px; border-radius: 8px;
+                  background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+  .stays .big a.alt { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .places { display: grid; gap: 6px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+  .place { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+           font-size: 13px; background: var(--panel); }
+  .place .meta { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+  .place .ptop { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .pprice { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tag.airbnb { color: #ff5a5f; }
+  .tag.booking { color: #4a8cff; }
+  .tag.google { color: #34a853; }
+  .srcs { font-size: 9px; color: var(--muted); margin-left: 4px; letter-spacing: .5px; }
+  th.sorted::after { content: " ↕"; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .tag { font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+  .tag.ryanair { color: var(--ryanair); }
+  .tag.wizzair { color: var(--wizzair); }
+  .tag.lot { color: var(--warn); }
+  .tag.kiwi { color: var(--ok); }
+  .tag.lufthansa { color: #f0c14b; }
+  .tag.chinaairlines { color: #d9376e; }
+  .tag.easyjet { color: #ff6600; }
+  .tag.combo { color: #a78bfa; }
+  .price { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .best { color: var(--ok); }
+  a { color: var(--accent); }
+  .empty { padding: 26px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Wyszukiwarka tanich lotów</h1>
+  <div class="sub">Ryanair, Wizz Air, LOT i Lufthansa prosto z ich systemów, reszta linii przez Kiwi.com. Kraje, lotniska i trasy pobierane na żywo.</div>
+
+  <div class="panel">
+    <div class="grid">
+      <div>
+        <label for="from">Kraj wylotu</label>
+        <select id="from"></select>
+      </div>
+      <div>
+        <label for="to">Kraj docelowy</label>
+        <select id="to"></select>
+      </div>
+      <div>
+        <label for="trip">Typ podróży</label>
+        <select id="trip">
+          <option value="oneway">W jedną stronę</option>
+          <option value="return">Powrotny</option>
+        </select>
+      </div>
+      <div class="tripOnly" hidden>
+        <label for="nights">Pobyt (nocy)</label>
+        <input type="number" id="nights" value="7" min="0" max="60">
+      </div>
+      <div class="tripOnly" hidden>
+        <label for="nightsTol">Tolerancja ± (dni)</label>
+        <input type="number" id="nightsTol" value="2" min="0" max="14">
+        <div class="hint" id="nightsHint">szuka pobytów 5–9 nocy</div>
+      </div>
+      <div>
+        <label for="dateFrom">Data od</label>
+        <input type="date" id="dateFrom">
+      </div>
+      <div>
+        <label for="dateTo">Data do</label>
+        <input type="date" id="dateTo">
+      </div>
+      <div>
+        <label for="adults">Dorośli</label>
+        <input type="number" id="adults" value="1" min="1" max="9">
+      </div>
+      <div>
+        <label for="maxPrice">Cena maks. (opcjonalnie)</label>
+        <input type="number" id="maxPrice" min="0" step="10" placeholder="bez limitu">
+      </div>
+      <div class="span-all">
+        <div class="pickhead">
+          <label style="margin:0">Lotniska wylotu</label>
+          <span class="picksum" id="originsSum"></span>
+          <button type="button" class="linklike" data-clear="origins">wyczyść</button>
+        </div>
+        <div class="airports chiprow" id="origins"></div>
+      </div>
+      <div class="span-all">
+        <div class="pickhead">
+          <label style="margin:0">Lotniska docelowe</label>
+          <span class="picksum" id="destsSum"></span>
+          <button type="button" class="linklike" data-clear="dests">wyczyść</button>
+        </div>
+        <div class="airports chiprow" id="dests"></div>
+      </div>
+      <div class="span-all">
+        <div class="pickhead">
+          <label style="margin:0">Dzień wylotu</label>
+          <span class="picksum" id="weekdaysSum"></span>
+          <button type="button" class="linklike" data-clear="weekdays">wyczyść</button>
+        </div>
+        <div class="chiprow" id="weekdays">
+          <label class="chip"><input type="checkbox" value="0"><span>pon</span></label>
+          <label class="chip"><input type="checkbox" value="1"><span>wt</span></label>
+          <label class="chip"><input type="checkbox" value="2"><span>śr</span></label>
+          <label class="chip"><input type="checkbox" value="3"><span>czw</span></label>
+          <label class="chip"><input type="checkbox" value="4"><span>pt</span></label>
+          <label class="chip"><input type="checkbox" value="5"><span>sob</span></label>
+          <label class="chip"><input type="checkbox" value="6"><span>nd</span></label>
+          <span class="check" style="margin-left:6px">
+            <label for="weekdayTol" style="margin:0">±</label>
+            <select id="weekdayTol" style="width:auto">
+              <option value="0">0 dni</option>
+              <option value="1">1 dzień</option>
+              <option value="2">2 dni</option>
+            </select>
+          </span>
+        </div>
+        <div class="hint">np. poniedziałek ±1 dzień = niedziela, poniedziałek lub wtorek</div>
+      </div>
+      <div class="span-all comboOnly" hidden>
+        <div class="pickhead">
+          <label style="margin:0">Powrót na lotnisko</label>
+          <span class="picksum" id="returnDestsSum"></span>
+          <button type="button" class="linklike" data-clear="returnDests">wyczyść</button>
+        </div>
+        <div class="airports chiprow" id="returnDests"></div>
+        <div class="hint">np. wylot z GDN, powrót do POZ — dwa osobne bilety</div>
+      </div>
+    </div>
+
+    <div class="row" id="carrierRow"></div>
+
+    <div class="row tripOnly" hidden>
+      <span class="check">
+        <input type="checkbox" id="combos">
+        <label for="combos" style="margin:0">Łącz 2 bilety w jedną podróż</label>
+      </span>
+      <span class="check comboOnly" hidden>
+        <input type="checkbox" id="mixedCarriers" checked>
+        <label for="mixedCarriers" style="margin:0">Różne linie tam i z powrotem</label>
+      </span>
+      <span class="check comboOnly" hidden>
+        <input type="checkbox" id="openJaw">
+        <label for="openJaw" style="margin:0">Powrót na inne lotnisko</label>
+      </span>
+    </div>
+
+    <div class="row">
+      <span class="check" id="stopsWrap">
+        <label for="maxStops" style="margin:0">Przesiadki</label>
+        <select id="maxStops" style="width:auto">
+          <option value="0">bezpośrednie</option>
+          <option value="1">max 1</option>
+          <option value="2">max 2</option>
+        </select>
+      </span>
+      <span class="check"><input type="checkbox" id="allDays"><label for="allDays" style="margin:0">Wszystkie dni (wolniejsze)</label></span>
+      <span class="check">
+        <input type="checkbox" id="cheapOnly" checked>
+        <label for="cheapOnly" style="margin:0">Tylko najtańsze do</label>
+        <select id="maxRatio" style="width:auto">
+          <option value="1.25">125%</option>
+          <option value="1.5" selected>150%</option>
+          <option value="2">200%</option>
+          <option value="3">300%</option>
+        </select>
+        <span class="hint" style="margin:0">najtańszej ceny</span>
+      </span>
+      <button id="go">Szukaj</button>
+      <button id="stop" class="ghost" hidden>Przerwij</button>
+    </div>
+
+    <div id="status"></div>
+    <div class="bar"><i id="barFill"></i></div>
+    <div class="warns" id="warns"></div>
+  </div>
+
+  <div class="results" id="results" hidden>
+    <div class="tools">
+      <input type="text" id="filter" placeholder="Filtruj (np. BCN, KRK, 09-28)">
+      <button class="ghost" id="csv">Pobierz CSV</button>
+      <span id="count" class="sub" style="margin:0"></span>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th data-k="airline">Linia</th>
+          <th data-k="origin">Trasa</th>
+          <th data-k="date">Wylot</th>
+          <th data-k="date_back" class="ret">Powrót</th>
+          <th data-k="nights" class="ret">Noce</th>
+          <th data-k="price" class="pricecol">Cena</th>
+          <th class="pricecol"></th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ROWS = [], VIEW = [], SORT = { key: "price", dir: 1 }, ES = null, CARRIERS = [];
+const STAYS_DEFAULTS = { radius: 30, adults: 2, bedrooms: 1, type: "any", nights: 7 };
+let STAY_META = null;
+const CARRIER_TAG = {
+  ryanair: "RYANAIR", wizzair: "WIZZ", lot: "LOT", kiwi: "KIWI",
+  lufthansa: "LUFTHANSA", chinaairlines: "CHINA AIR", easyjet: "EASYJET",
+  combo: "2 BILETY",
+};
+
+async function loadCarriers() {
+  CARRIERS = await (await fetch("/api/carriers")).json();
+  $("carrierRow").innerHTML = CARRIERS.map(c => `
+    <span class="check">
+      <input type="checkbox" id="c_${c.key}" value="${c.key}" ${c.key === "kiwi" ? "" : "checked"}>
+      <label for="c_${c.key}" style="margin:0">${c.label}</label>
+    </span>`).join("");
+}
+
+function selectedCarriers() {
+  return CARRIERS.map(c => c.key).filter(k => $("c_" + k)?.checked);
+}
+
+function iso(d) { return d.toISOString().slice(0, 10); }
+function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
+
+async function loadCountries() {
+  const res = await fetch("/api/countries");
+  const list = await res.json();
+  for (const sel of [$("from"), $("to")]) {
+    sel.innerHTML = list
+      .map(c => `<option value="${c.code}">${c.name} (${c.code.toUpperCase()})</option>`)
+      .join("");
+  }
+  // sensible defaults, still fully changeable
+  if (list.some(c => c.code === "pl")) $("from").value = "pl";
+  if (list.some(c => c.code === "es")) $("to").value = "es";
+  loadOrigins();
+  loadDests();
+}
+
+// ---- airport pickers -------------------------------------------------------
+// Chips rather than <select multiple>: multi-select there needs ctrl/cmd-click
+// and gives no sign that it does, so an unfamiliar visitor can only ever pick
+// one airport (and silently replaces their pick every time they click).
+
+const PICK_EMPTY = {
+  origins: "wszystkie lotniska w kraju wylotu",
+  dests: "cały kraj docelowy",
+  returnDests: "to samo lotnisko co wylot",
+  weekdays: "dowolny dzień tygodnia",
+};
+const DAY_NAMES = ["pon", "wt", "śr", "czw", "pt", "sob", "nd"];
+
+function picked(id) {
+  return [...$(id).querySelectorAll("input:checked")].map(i => i.value);
+}
+
+// same wrap-around rule the server applies, so the summary can't disagree
+// with what the search actually accepts
+function expandWeekdays(days, tol) {
+  const out = new Set();
+  for (const d of days.map(Number))
+    for (let k = -tol; k <= tol; k++) out.add(((d + k) % 7 + 7) % 7);
+  return [...out].sort((a, b) => a - b);
+}
+
+function syncPickSummary(id) {
+  const sel = picked(id);
+  if (id === "weekdays") {
+    const tol = +$("weekdayTol").value || 0;
+    $("weekdaysSum").textContent = sel.length
+      ? `wylot w: ${expandWeekdays(sel, tol).map(d => DAY_NAMES[d]).join(", ")}`
+      : PICK_EMPTY.weekdays;
+    return;
+  }
+  $(id + "Sum").textContent = sel.length
+    ? `wybrano: ${sel.join(", ")}`
+    : PICK_EMPTY[id];
+}
+
+async function loadAirports(id, country) {
+  const box = $(id);
+  box.innerHTML = `<span class="picksum">ładowanie…</span>`;
+  const res = await fetch("/api/airports?country=" + encodeURIComponent(country));
+  const list = await res.json();
+  box.innerHTML = list.map(a => `
+    <label class="chip">
+      <input type="checkbox" value="${a.code}">
+      <span class="code">${a.code}</span><span class="nm">${esc(a.name)}</span>
+    </label>`).join("") || `<span class="picksum">brak lotnisk</span>`;
+  syncPickSummary(id);
+}
+
+const loadOrigins = () => loadAirports("origins", $("from").value);
+const loadDests = () => loadAirports("dests", $("to").value);
+// open-jaw returns land back in the origin country, so the airport list to
+// pick from is the same one the outbound departs from
+const loadReturnDests = () => loadAirports("returnDests", $("from").value);
+
+document.addEventListener("change", (ev) => {
+  const box = ev.target.closest(".airports, #weekdays");
+  if (box) syncPickSummary(box.id);
+  // the tolerance select lives inside #weekdays but changing it has to
+  // re-expand the summary too
+  if (ev.target.id === "weekdayTol") syncPickSummary("weekdays");
+});
+document.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("[data-clear]");
+  if (!btn) return;
+  const id = btn.dataset.clear;
+  $(id).querySelectorAll("input:checked").forEach(i => { i.checked = false; });
+  syncPickSummary(id);
+});
+
+function setStatus(text, pct) {
+  $("status").textContent = text;
+  if (pct !== undefined) $("barFill").style.width = Math.min(100, pct) + "%";
+}
+
+function render() {
+  const q = $("filter").value.trim().toLowerCase();
+  let rows = ROWS;
+  if (q) {
+    rows = rows.filter(r =>
+      [r.carrier, r.airline, r.origin, r.origin_name, r.dest, r.dest_name,
+       r.date, r.flight_number].join(" ").toLowerCase().includes(q));
+  }
+  rows = [...rows].sort((a, b) => {
+    const x = a[SORT.key], y = b[SORT.key];
+    if (typeof x === "number" && typeof y === "number") return (x - y) * SORT.dir;
+    return String(x).localeCompare(String(y)) * SORT.dir;
+  });
+
+  VIEW = rows;
+  const cheapest = rows.length ? Math.min(...rows.map(r => r.price)) : null;
+  $("tbody").innerHTML = rows.map((r, i) => `
+    <tr class="frow" data-i="${i}">
+      <td>
+        <span class="tag ${r.carrier}">${CARRIER_TAG[r.carrier] || r.carrier}</span>
+        <div class="sub2">${r.airline || ""}${r.airline_back && r.airline_back !== r.airline ? " / " + r.airline_back : ""}</div>
+      </td>
+      <td>
+        <b>${r.origin} → ${r.dest}${r.dest_back ? ` → ${r.dest_back}` : ""}</b>
+        <div class="sub2">${[r.origin_name, r.dest_name, r.dest_back_name].filter(Boolean).join(" · ")}${
+          r.stops ? ` · ${r.stops} przes.` : ""}${
+          r.dest_back ? " · powrót na inne lotnisko" : ""}</div>
+      </td>
+      <td>${r.date}<div class="sub2">${[r.times, r.flight_number].filter(Boolean).join(" · ")}</div></td>
+      <td class="ret">${r.date_back || ""}<div class="sub2">${
+        [r.times_back, r.flight_number_back].filter(Boolean).join(" · ")}</div></td>
+      <td class="ret">${r.nights ?? ""}</td>
+      <td class="price pricecol ${r.price === cheapest ? "best" : ""}">${r.price.toFixed(2)} ${r.currency}${
+        r.price_out != null && r.price_back != null
+          ? `<div class="split">${r.price_out.toFixed(2)} + ${r.price_back.toFixed(2)}</div>` : ""}</td>
+      <td class="pricecol nowrapcell">
+        ${r.link_back
+          ? `<a href="${r.link}" target="_blank" rel="noopener noreferrer">bilet tam ↗</a>
+             <a href="${r.link_back}" target="_blank" rel="noopener noreferrer">bilet powrót ↗</a>`
+          : `<a href="${r.link}" target="_blank" rel="noopener noreferrer">lot ↗</a>`}
+        <button class="linklike stays-btn" data-i="${i}">noclegi</button>
+      </td>
+    </tr>`).join("") ||
+    `<tr><td colspan="7" class="empty">Brak wyników dla tego filtra.</td></tr>`;
+
+  $("count").textContent = `${rows.length} z ${ROWS.length} wyników`;
+  document.querySelectorAll("th[data-k]").forEach(th =>
+    th.classList.toggle("sorted", th.dataset.k === SORT.key));
+
+  // row indices just got rebuilt (sort/filter/new results) - a panel open
+  // against the old numbering would silently point at the wrong flight
+  closeStaysPanel();
+}
+
+// ---- stays panel -----------------------------------------------------------
+
+function addDaysISO(iso, n) {
+  const d = new Date(iso + "T12:00:00");
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+function staysForm(i, r) {
+  const checkout = r.date_back || addDaysISO(r.date, STAYS_DEFAULTS.nights);
+  return `
+    <div class="stays" data-i="${i}">
+      <h4>Noclegi w okolicy ${r.dest}${r.dest_name ? " · " + r.dest_name : ""}</h4>
+
+      <div class="field-grid">
+        <div><label>Zameldowanie</label><input type="date" class="s-in" value="${r.date}"></div>
+        <div><label>Wymeldowanie</label><input type="date" class="s-out" value="${checkout}"></div>
+        <div><label>Promień (km)</label><input type="number" class="s-radius" min="1" max="200" value="${STAYS_DEFAULTS.radius}"></div>
+        <div><label>Dorośli</label><input type="number" class="s-adults" min="1" max="16" value="${STAYS_DEFAULTS.adults}"></div>
+        <div><label>Sypialnie</label><input type="number" class="s-bedrooms" min="0" max="10" value="${STAYS_DEFAULTS.bedrooms}"></div>
+        <div><label>Rodzaj</label>
+          <select class="s-type">
+            <option value="any">dowolny</option>
+            <option value="apartment">apartament</option>
+            <option value="hotel">hotel</option>
+            <option value="hostel">hostel</option>
+          </select>
+        </div>
+        <div><label>Cena/noc od</label><input type="number" class="s-minnight" min="0" step="50" placeholder="brak"></div>
+        <div><label>Cena/noc do</label><input type="number" class="s-maxnight" min="0" step="50" placeholder="brak"></div>
+      </div>
+
+      <section>
+        <div class="sectlabel">Źródła</div>
+        <div class="chiprow s-sources"></div>
+      </section>
+
+      <section>
+        <div class="sectlabel">Filtry</div>
+        <div class="chiprow s-filters"></div>
+      </section>
+
+      <div class="actionrow">
+        <button class="s-go">Szukaj noclegów</button>
+        <span class="sub s-support"></span>
+      </div>
+      <div class="s-out-area"><span class="sub">Ustaw filtry i kliknij „Szukaj noclegów”.</span></div>
+    </div>`;
+}
+
+const SOURCE_LABEL = { airbnb: "Airbnb", booking: "Booking", google: "Google" };
+
+// Names/addresses/blurbs come straight from scraped third-party pages and can
+// contain stray "<" from markup the scraper's regex stripper didn't fully
+// clean (seen from Booking: `<h4 role="link" tab<="" div="">`). Inserted raw
+// via innerHTML that opens a real, unclosed element that swallows every card
+// after it as its children - the whole stays list collapses into one nested
+// blob. Every scraped string goes through this before it touches innerHTML.
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+async function loadStayFilters() {
+  if (STAY_META) return STAY_META;
+  STAY_META = await (await fetch("/api/stay-filters")).json();
+  return STAY_META;
+}
+
+function fillStayControls(box) {
+  box.querySelector(".s-sources").innerHTML = STAY_META.sources.map(s => `
+    <label class="chip"><input type="checkbox" class="s-src" value="${s}" checked>${SOURCE_LABEL[s] || s}</label>`).join("");
+  box.querySelector(".s-filters").innerHTML = STAY_META.filters.map(f => `
+    <label class="chip" title="obsługują: ${f.sources.map(s => SOURCE_LABEL[s]).join(", ") || "brak"}">
+      <input type="checkbox" class="s-flt" value="${f.key}">${f.label}<span class="srcs">${
+        f.sources.map(s => SOURCE_LABEL[s][0]).join("")}</span></label>`).join("");
+  const sync = () => {
+    const picked = [...box.querySelectorAll(".s-flt:checked")].map(i => i.value);
+    const usable = STAY_META.sources.filter(s =>
+      picked.every(k => (STAY_META.filters.find(f => f.key === k) || {}).sources.includes(s)));
+    box.querySelector(".s-support").textContent = picked.length
+      ? `Wybrane filtry obsługują: ${usable.map(s => SOURCE_LABEL[s]).join(", ") || "żadne źródło"}`
+      : "Bez filtrów przeszukane zostaną wszystkie zaznaczone źródła.";
+  };
+  box.querySelectorAll(".s-flt").forEach(i => i.addEventListener("change", sync));
+  sync();
+}
+
+async function runStays(box, dest) {
+  const val = (c) => box.querySelector(c).value;
+  const area = box.querySelector(".s-out-area");
+  const sources = [...box.querySelectorAll(".s-src:checked")].map(i => i.value);
+  const filters = [...box.querySelectorAll(".s-flt:checked")].map(i => i.value);
+  if (!sources.length) { area.innerHTML = `<span class="warns">Zaznacz co najmniej jedno źródło.</span>`; return; }
+  area.innerHTML = `<span class="sub">Szukam noclegów (${sources.join(" + ")})… Booking i Google uruchamiają przeglądarkę, pierwsze wyszukanie trwa dłużej.</span>`;
+
+  const p = new URLSearchParams({
+    dest, checkin: val(".s-in"), checkout: val(".s-out"),
+    radius_km: val(".s-radius"), adults: val(".s-adults"),
+    bedrooms: val(".s-bedrooms"), type: val(".s-type"),
+    sources: sources.join(","), filters: filters.join(","),
+  });
+  if (val(".s-minnight")) p.set("min_night", val(".s-minnight"));
+  if (val(".s-maxnight")) p.set("max_night", val(".s-maxnight"));
+
+  let d;
+  try {
+    const res = await fetch("/api/stays?" + p.toString());
+    d = await res.json();
+    if (d.error) throw new Error(d.error);
+  } catch (e) {
+    area.innerHTML = `<span class="warns">Nie udało się pobrać: ${esc(e.message)}</span>`;
+    return;
+  }
+
+  const nights = d.nights;
+  const cheapest = d.listings.reduce(
+    (m, s) => (s.price_total && (m === null || s.price_total < m) ? s.price_total : m), null);
+
+  const cards = d.listings.map(s => {
+    const total = s.price_total
+      ? `${Math.round(s.price_total).toLocaleString("pl-PL")} ${s.currency}`
+      : (s.price_label || "—");
+    const perNight = s.price_per_night
+      ? `${Math.round(s.price_per_night).toLocaleString("pl-PL")} ${s.currency}/noc` : "";
+    const km = s.distance_km != null ? `${s.distance_km} km od lotniska`
+      : (s.distance_center_km != null ? `~${s.distance_center_km} km od centrum` : "");
+    const safeLink = /^https:\/\//.test(s.link || "") ? s.link : "#";
+    return `
+      <div class="place">
+        <div class="ptop">
+          <span class="tag ${s.source}">${(SOURCE_LABEL[s.source] || s.source).toUpperCase()}</span>
+          <span class="pprice ${s.price_total === cheapest ? "best" : ""}">${esc(total)}</span>
+        </div>
+        <a href="${esc(safeLink)}" target="_blank" rel="noopener noreferrer">${esc(s.name) || "(bez nazwy)"}</a>
+        <div class="meta">${esc([perNight, s.rating ? "★ " + s.rating : "", km,
+          s.provider ? "przez " + s.provider : "", s.kind].filter(Boolean).join(" · "))}</div>
+      </div>`;
+  }).join("");
+
+  const errs = esc(Object.entries(d.errors || {})
+    .map(([k, v]) => `${SOURCE_LABEL[k] || k}: ${v}`).join(" · "));
+  const skipped = esc(Object.entries(d.sources_skipped || {})
+    .map(([k, why]) => `${SOURCE_LABEL[k] || k} pominięty (brak filtru: ${why.join(", ")})`)
+    .join(" · "));
+  area.innerHTML = `
+    <div class="sub">${d.listings.length} ofert na ${nights} nocy w promieniu ${d.radius_km} km od ${esc(d.airport.code)}
+      · źródła: ${esc(d.sources_used.map(s => SOURCE_LABEL[s]).join(", ")) || "brak"}${
+      skipped ? ` · ${skipped}` : ""}${errs ? ` · <span class="warns">${errs}</span>` : ""}</div>
+    <div class="places" style="margin:8px 0 12px">${cards || "<span class='sub'>Brak ofert dla tych filtrów.</span>"}</div>
+    <div class="big">
+      <a href="${esc(d.links.booking)}" target="_blank" rel="noopener noreferrer">Wszystkie na Booking.com ↗</a>
+      <a class="alt" href="${esc(d.links.airbnb)}" target="_blank" rel="noopener noreferrer">Wszystkie na Airbnb ↗</a>
+      <a class="alt" href="${esc(d.links.google)}" target="_blank" rel="noopener noreferrer">Google Hotels ↗</a>
+    </div>`;
+}
+
+let renderTimer = null;
+function scheduleRender() {
+  if (renderTimer) return;             // coalesce bursts of streamed rows
+  renderTimer = setTimeout(() => { renderTimer = null; render(); }, 300);
+}
+
+function toCSV() {
+  const cols = ["carrier", "airline", "airline_back", "stops", "origin",
+                "origin_name", "dest", "dest_name", "dest_back",
+                "dest_back_name", "date", "times",
+                "flight_number", "date_back", "times_back",
+                "flight_number_back", "nights", "price_out", "price_back",
+                "price", "currency", "link", "link_back"];
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const body = ROWS.map(r => cols.map(c => esc(r[c])).join(",")).join("\n");
+  const blob = new Blob([cols.join(",") + "\n" + body], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `loty_${$("from").value}_${$("to").value}_${$("dateFrom").value}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function stopSearch() {
+  if (ES) { ES.close(); ES = null; }
+  $("go").disabled = false;
+  $("stop").hidden = true;
+}
+
+function search() {
+  const carriers = selectedCarriers();
+  if (!carriers.length) { setStatus("Zaznacz co najmniej jedno źródło.", 0); return; }
+  if ($("dateTo").value < $("dateFrom").value) { setStatus("Data „do” jest przed datą „od”.", 0); return; }
+
+  const origins = picked("origins");
+  const isReturn = $("trip").value === "return";
+  const p = new URLSearchParams({
+    from: $("from").value,
+    to: $("to").value,
+    date_from: $("dateFrom").value,
+    date_to: $("dateTo").value,
+    adults: $("adults").value || "1",
+    carriers: carriers.join(","),
+    mode: $("allDays").checked ? "calendar" : "cheapest",
+    trip: $("trip").value,
+    nights: $("nights").value || "7",
+    nights_tol: $("nightsTol").value || "0",
+    max_stops: $("maxStops").value || "0",
+  });
+  document.body.classList.toggle("oneway", !isReturn);
+  if (origins.length) p.set("origins", origins.join(","));
+  const dests = picked("dests");
+  if (dests.length) p.set("dests", dests.join(","));
+  if ($("maxPrice").value) p.set("max_price", $("maxPrice").value);
+  if ($("cheapOnly").checked) p.set("max_ratio", $("maxRatio").value);
+  const wd = picked("weekdays");
+  if (wd.length) {
+    p.set("weekdays", wd.join(","));
+    p.set("weekday_tol", $("weekdayTol").value || "0");
+  }
+  if (isReturn && $("combos").checked) {
+    p.set("combos", "1");
+    if ($("mixedCarriers").checked) p.set("mixed_carriers", "1");
+    if ($("openJaw").checked) {
+      p.set("open_jaw", "1");
+      const rd = picked("returnDests");
+      if (rd.length) p.set("return_dests", rd.join(","));
+    }
+  }
+
+  ROWS = [];
+  $("results").hidden = true;
+  $("warns").innerHTML = "";
+  $("go").disabled = true;
+  $("stop").hidden = false;
+  setStatus("Pobieram trasy…", 2);
+
+  ES = new EventSource("/api/search?" + p.toString());
+  const started = Date.now();
+  ES.addEventListener("progress", e => {
+    const d = JSON.parse(e.data);
+    const pct = d.total ? (d.done / d.total) * 100 : 2;
+    const secs = Math.round((Date.now() - started) / 1000);
+    setStatus(`Zapytania: ${d.done}/${d.total} · ${ROWS.length} połączeń · ${secs}s`, pct);
+  });
+  ES.addEventListener("warn", e => {
+    const d = JSON.parse(e.data);
+    const div = document.createElement("div");
+    div.textContent = `${d.carrier}: ${d.message}`;
+    $("warns").appendChild(div);
+  });
+  ES.addEventListener("rows", e => {
+    ROWS = ROWS.concat(JSON.parse(e.data).rows);
+    $("results").hidden = false;
+    scheduleRender();
+  });
+  ES.addEventListener("results", e => {
+    // final authoritative set: deduplicated and sorted server-side
+    ROWS = JSON.parse(e.data).rows;
+    $("results").hidden = false;
+    render();
+  });
+  ES.addEventListener("done", e => {
+    const d = JSON.parse(e.data);
+    const over = d.dropped_over_ratio
+      ? ` (${d.dropped_over_ratio} droższych odrzucono)` : "";
+    setStatus(d.count
+      ? `Gotowe — ${d.count} połączeń.${over}`
+      : `Gotowe — brak połączeń dla tych kryteriów.${over}`, 100);
+    stopSearch();
+  });
+  ES.addEventListener("error", e => {
+    if (e.data) { try { setStatus("Błąd: " + JSON.parse(e.data).message, 100); } catch {} }
+    else if (ES && ES.readyState === EventSource.CLOSED) setStatus("Połączenie przerwane.", 100);
+    stopSearch();
+  });
+}
+
+function syncTripFields() {
+  const isReturn = $("trip").value === "return";
+  document.querySelectorAll(".tripOnly").forEach(el => el.hidden = !isReturn);
+  const combosOn = isReturn && $("combos").checked;
+  document.querySelectorAll(".comboOnly").forEach(el => el.hidden = !combosOn);
+  // the return-airport list only matters once open-jaw is actually on
+  const openJawOn = combosOn && $("openJaw").checked;
+  $("returnDests").closest(".comboOnly").hidden = !openJawOn;
+  if (openJawOn && !$("returnDests").children.length) loadReturnDests();
+  const n = +$("nights").value || 0, t = +$("nightsTol").value || 0;
+  $("nightsHint").textContent = t
+    ? `szuka pobytów ${Math.max(0, n - t)}–${n + t} nocy`
+    : `szuka pobytów dokładnie ${n} nocy`;
+  $("allDays").parentElement.hidden = isReturn;   // return search is per-day already
+}
+
+$("trip").addEventListener("change", syncTripFields);
+$("nights").addEventListener("input", syncTripFields);
+$("nightsTol").addEventListener("input", syncTripFields);
+$("combos").addEventListener("change", syncTripFields);
+$("openJaw").addEventListener("change", syncTripFields);
+$("from").addEventListener("change", () => { loadOrigins(); loadReturnDests(); });
+$("to").addEventListener("change", loadDests);
+$("go").addEventListener("click", search);
+$("stop").addEventListener("click", () => { stopSearch(); setStatus("Przerwano.", 0); });
+$("filter").addEventListener("input", render);
+function closeStaysPanel() {
+  document.querySelectorAll("#tbody .staysrow").forEach(tr => tr.remove());
+  document.querySelectorAll(".frow.open").forEach(tr => tr.classList.remove("open"));
+  document.querySelectorAll(".stays-btn.active").forEach(b => b.classList.remove("active"));
+}
+
+$("tbody").addEventListener("click", (ev) => {
+  const btn = ev.target.closest(".stays-btn");
+  if (!btn) return;
+  const wasActive = btn.classList.contains("active");
+  closeStaysPanel();          // only one panel open at a time
+  if (wasActive) return;      // clicking the open row's own button just closes it
+
+  const flightRow = btn.closest("tr");
+  const r = VIEW[btn.dataset.i];
+  if (!flightRow || !r) return;
+
+  const tr = document.createElement("tr");
+  tr.className = "staysrow";
+  // every column, so the cell never participates in per-column width sizing
+  tr.innerHTML = `<td colspan="${flightRow.cells.length}">${staysForm(btn.dataset.i, r)}</td>`;
+  flightRow.after(tr);
+
+  btn.classList.add("active");
+  flightRow.classList.add("open");
+
+  const box = tr.querySelector(".stays");
+  loadStayFilters().then(() => fillStayControls(box));
+  box.querySelector(".s-go").addEventListener("click", () => runStays(box, r.dest));
+  tr.scrollIntoView({ behavior: "smooth", block: "nearest" });
+});
+$("csv").addEventListener("click", toCSV);
+document.querySelectorAll("th[data-k]").forEach(th => th.addEventListener("click", () => {
+  const k = th.dataset.k;
+  SORT = { key: k, dir: SORT.key === k ? -SORT.dir : 1 };
+  render();
+}));
+
+const today = new Date();
+$("dateFrom").value = iso(addDays(today, 7));
+$("dateTo").value = iso(addDays(today, 45));
+document.body.classList.add("oneway");
+syncTripFields();
+syncPickSummary("weekdays");
+loadCarriers().then(loadCountries);
+</script>
+</body>
+</html>
