@@ -14,7 +14,7 @@ third-party fare API, no API key. `server.py` is the local web UI that drives al
 | `lufthansa.py` | Lufthansa | the airline's own booking backend, behind a Cloudflare challenge - patchright drives a real Chrome tab through it |
 | `china_airlines.py` | China Airlines | same backend shape as Lufthansa, behind three stacked bot-protection vendors instead of one |
 | `kiwi.py` | **every remaining airline** — Eurowings, Vueling, Condor, Enter Air, Smartwings … | Kiwi.com's website GraphQL API |
-| `stays.py` | hotels and apartments near the destination airport, **with prices** | Airbnb + Booking.com + Google Hotels, scraped |
+| `stays.py` | hotels and apartments near the destination airport, **with prices** | Airbnb + Booking.com, scraped concurrently |
 | `fx.py` | currency conversion, so a Wizz Air PLN leg and a EUR leg add up correctly | ECB reference rates |
 
 Defaults: Poland -> Spain, PLN, `pl-pl` market — freely changeable, nothing is hardcoded.
@@ -213,23 +213,25 @@ pre-filled (check-out = the return date, or `+7` nights for a one-way) and these
 - **cena/noc od** and **do**
 - 13 amenity filters (pool, private pool, jacuzzi/spa, parking, gym, wifi, air conditioning,
   balcony, sea view, breakfast, free cancellation, entire place, rating 8+)
-- which sources to hit: **Airbnb**, **Booking**, **Google**
+- which sources to hit: **Airbnb** and **Booking**, both ticked by default
 
-It returns **actual listings, priced for the whole stay and per night**, merged from all three and
+The two are searched **at the same time**, so a search costs whichever is slower rather than the sum
+of both — measured on Barcelona/25 km: Airbnb alone 1.2s, Booking alone 30.1s, both together 30.1s.
+It returns **actual listings, priced for the whole stay and per night**, merged from both and
 sorted cheapest first: name, total, per-night, rating, distance, and a link straight to that
 property's page with the dates in it.
 
-### One filter vocabulary, three sources
+### One filter vocabulary, two sources
 
 `FILTERS` in [stays.py](stays.py) is the shared vocabulary. Every entry says how each source
 expresses that filter — or `None` when it cannot:
 
-| filter | Booking | Airbnb | Google |
-|---|---|---|---|
-| pool | `hotelfacility=433` | `amenities[]=7` | — |
-| jacuzzi / spa | `hotelfacility=54` (spa & wellness) | `amenities[]=25` (hot tub) | — |
-| entire place | `privacy_type=3` | `room_types[]=Entire home/apt` | — |
-| private pool, parking, gym, wifi, air conditioning, balcony, sea view, breakfast, free cancellation, rating 8+ | yes | — | — |
+| filter | Booking | Airbnb |
+|---|---|---|
+| pool | `hotelfacility=433` | `amenities[]=7` |
+| jacuzzi / spa | `hotelfacility=54` (spa & wellness) | `amenities[]=25` (hot tub) |
+| entire place | `privacy_type=3` | `room_types[]=Entire home/apt` |
+| private pool, parking, gym, wifi, air conditioning, balcony, sea view, breakfast, free cancellation, rating 8+ | yes | — |
 
 **A source that cannot express every selected filter is skipped, not queried unfiltered.** Tick
 something only Airbnb has and you get Airbnb-only results; tick "breakfast" and only Booking runs.
@@ -255,8 +257,7 @@ from **3838 PLN** to **819 PLN** total.
 
 Airbnb's own `price_min`/`price_max` and Booking's `price=` filter are applied server-side. Their
 nightly rate excludes fees that the displayed total includes, so those rows are *not* re-filtered
-here — that would throw away rows the sites already accepted. Google has no price filter at all, so
-its rows are the only ones filtered locally.
+here — that would throw away rows the sites already accepted.
 
 ### How each site is scraped
 
@@ -274,16 +275,16 @@ back fully server-rendered with prices, no scrolling. The browser starts at most
 stale token triggers exactly one re-mint. Booking reports distance from the **city centre**, not the
 airport, so the radius is applied against that as an approximation (shown as `~ km od centrum`).
 
-**Google Hotels** — `google.com/travel/search` via Playwright; the consent wall has to be rejected
-before results render. Cards give name, nightly price, rating and the provider behind the price. No
-URL-addressable filters, hence the `—` column above.
+Google Hotels used to be a third source and was dropped: it exposed no URL-addressable filters at
+all, so every filter had to be re-applied locally after the fact, and it cost a second Playwright
+browser run for results Booking already covers.
 
 ```bash
 pip install playwright        # no browser download, uses your system Chrome
 ```
 
-Playwright is optional and deliberately not in `requirements.txt`. Without it Airbnb still works;
-Booking and Google report why they could not run.
+Playwright is optional and deliberately not in `requirements.txt`. Without it Airbnb still works and
+Booking reports why it could not run.
 
 ### Lufthansa (`lufthansa.py`)
 
@@ -359,12 +360,12 @@ pip install patchright && patchright install chrome
 ```
 
 ```bash
-.venv/bin/python stays.py --airport PMI --checkin 2026-09-08 --checkout 2026-09-15 --sources airbnb,google --limit 30
+.venv/bin/python stays.py --airport PMI --checkin 2026-09-08 --checkout 2026-09-15 --sources airbnb --limit 30
 ```
 
 `GET /api/stay-filters` lists the vocabulary and which sources support each entry.
 
-`GET /api/stays?dest=BCN&checkin=…&checkout=…&radius_km=20&adults=1&filters=pool,entire&min_night=100&max_night=400&sources=airbnb,booking,google&bands=4`
+`GET /api/stays?dest=BCN&checkin=…&checkout=…&radius_km=20&adults=1&filters=pool,entire&min_night=100&max_night=400&sources=airbnb,booking&bands=4`
 
 ---
 

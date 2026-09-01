@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Stays with real prices near a destination airport - Airbnb, Booking, Google.
+"""Stays with real prices near a destination airport - Airbnb and Booking.
 
-Three sources, one filter model, prices for the whole stay:
+Two sources, searched at the same time, one filter model, prices for the whole
+stay:
 
   Airbnb   - the search page ships results as JSON inside
              <script id="data-deferred-state-0">, so one curl_cffi request is
@@ -17,9 +18,15 @@ Three sources, one filter model, prices for the whole stay:
              (`nflt=price=CUR-min-max-1`) with `order=price` - each band returns
              its own cheapest 25, which is how the genuinely cheap listings get
              found instead of only the first relevance page.
-  Google   - google.com/travel/search, via Playwright (consent wall has to be
-             rejected first). No URL-addressable filters, so its results are
-             filtered on this side by price only.
+
+The two run concurrently: Airbnb is one fast HTTP request while Booking pays
+for a browser plus a band walk, so running them in sequence meant every search
+cost Airbnb's time *plus* Booking's for no reason.
+
+Google Hotels used to be a third source and was dropped: it exposes no
+URL-addressable filters at all, so every filter had to be applied on this side
+after the fact, and it needed a second Playwright browser run to get results
+that Booking already covers.
 
 FILTERS below is the shared vocabulary. Each entry says how a source expresses
 that filter, or None when it cannot. A source that cannot express every selected
@@ -32,7 +39,7 @@ Usage:
   python stays.py --airport BCN --checkin 2026-09-10 --checkout 2026-09-17 \
       --radius-km 20 --bedrooms 1 --adults 1 --filters pool --max-night 250
   python stays.py --airport PMI --checkin 2026-09-08 --checkout 2026-09-15 \
-      --sources airbnb,google --limit 30
+      --sources airbnb --limit 30
 """
 
 from __future__ import annotations
@@ -44,31 +51,32 @@ import math
 import re
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from urllib.parse import quote, urlencode
 
 from curl_cffi import requests as cr
 
 KIWI_LOCATIONS = "https://api.skypicker.com/locations"
-SOURCES = ("airbnb", "booking", "google")
+SOURCES = ("airbnb", "booking")
 
 # Shared filter vocabulary. Booking ids were read off its live filter panel;
 # the Airbnb amenity ids are the ones verified to actually change results.
 FILTERS: dict[str, dict] = {
-    "pool":         {"label": "Basen",                "booking": "hotelfacility=433", "airbnb": "amenities%5B%5D=7",  "google": None},
-    "private_pool": {"label": "Basen prywatny",       "booking": "roomfacility=93",   "airbnb": None,                 "google": None},
-    "hot_tub":      {"label": "Jacuzzi / spa",        "booking": "hotelfacility=54",  "airbnb": "amenities%5B%5D=25", "google": None},
-    "parking":      {"label": "Parking",              "booking": "hotelfacility=2",   "airbnb": None,                 "google": None},
-    "gym":          {"label": "Siłownia",             "booking": "hotelfacility=11",  "airbnb": None,                 "google": None},
-    "wifi":         {"label": "Wi-Fi",                "booking": "hotelfacility=107", "airbnb": None,                 "google": None},
-    "aircon":       {"label": "Klimatyzacja",         "booking": "roomfacility=11",   "airbnb": None,                 "google": None},
-    "balcony":      {"label": "Balkon",               "booking": "roomfacility=17",   "airbnb": None,                 "google": None},
-    "sea_view":     {"label": "Widok na morze",       "booking": "roomfacility=108",  "airbnb": None,                 "google": None},
-    "breakfast":    {"label": "Śniadanie",            "booking": "mealplan=1",        "airbnb": None,                 "google": None},
-    "free_cancel":  {"label": "Bezpłatne odwołanie",  "booking": "fc=2",              "airbnb": None,                 "google": None},
+    "pool":         {"label": "Basen",                "booking": "hotelfacility=433", "airbnb": "amenities%5B%5D=7"},
+    "private_pool": {"label": "Basen prywatny",       "booking": "roomfacility=93",   "airbnb": None},
+    "hot_tub":      {"label": "Jacuzzi / spa",        "booking": "hotelfacility=54",  "airbnb": "amenities%5B%5D=25"},
+    "parking":      {"label": "Parking",              "booking": "hotelfacility=2",   "airbnb": None},
+    "gym":          {"label": "Siłownia",             "booking": "hotelfacility=11",  "airbnb": None},
+    "wifi":         {"label": "Wi-Fi",                "booking": "hotelfacility=107", "airbnb": None},
+    "aircon":       {"label": "Klimatyzacja",         "booking": "roomfacility=11",   "airbnb": None},
+    "balcony":      {"label": "Balkon",               "booking": "roomfacility=17",   "airbnb": None},
+    "sea_view":     {"label": "Widok na morze",       "booking": "roomfacility=108",  "airbnb": None},
+    "breakfast":    {"label": "Śniadanie",            "booking": "mealplan=1",        "airbnb": None},
+    "free_cancel":  {"label": "Bezpłatne odwołanie",  "booking": "fc=2",              "airbnb": None},
     "entire":       {"label": "Całe mieszkanie",      "booking": "privacy_type=3",
-                     "airbnb": "room_types%5B%5D=" + quote("Entire home/apt", safe=""), "google": None},
-    "rating8":      {"label": "Ocena 8+ / 4,5+",      "booking": "review_score=80",   "airbnb": None,                 "google": None},
+                     "airbnb": "room_types%5B%5D=" + quote("Entire home/apt", safe="")},
+    "rating8":      {"label": "Ocena 8+ / 4,5+",      "booking": "review_score=80",   "airbnb": None},
 }
 
 # soft preferences: applied where a source understands them, never a reason to
@@ -463,84 +471,6 @@ class Stays:
             raise RuntimeError(errors[0])
         return list(seen.values())
 
-    # ---------- Google ----------
-
-    def google_url(self, city: str, checkin: str, checkout: str,
-                   adults: int = 2) -> str:
-        q = quote(f"hotels near {city}")
-        return (f"https://www.google.com/travel/search?q={q}"
-                f"&hl=en&gl=us&currency={self.currency}"
-                f"&checkin={checkin}&checkout={checkout}&adults={adults}")
-
-    def google_search(self, url: str, limit: int = 24) -> list[dict]:
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as e:
-            raise RuntimeError("Google needs `pip install playwright`") from e
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(channel="chrome", headless=True)
-            ctx = browser.new_context(locale="en-US",
-                                      viewport={"width": 1400, "height": 950})
-            page = ctx.new_page()
-            try:
-                page.goto(url, wait_until="domcontentloaded",
-                          timeout=self.timeout * 1000)
-                page.wait_for_timeout(2500)
-                for label in ("Reject all", "Odrzuć wszystko"):
-                    try:
-                        page.get_by_role("button", name=label).first.click(
-                            timeout=3500)
-                        break
-                    except Exception:  # noqa: BLE001 - consent wall may be absent
-                        pass
-                page.wait_for_timeout(5000)
-                for _ in range(3):
-                    page.mouse.wheel(0, 1400)
-                    page.wait_for_timeout(800)
-                cards = page.evaluate("""() => [...document.querySelectorAll('.MY0II')]
-                    .map(el => {
-                      const a = el.closest('a') || el.querySelector('a');
-                      return { text: el.innerText, href: a ? a.href : null };
-                    })""")
-            finally:
-                browser.close()
-
-        out, seen = [], set()
-        for c in cards:
-            lines = [l.strip() for l in (c.get("text") or "").split("\n")
-                     if l.strip()]
-            if len(lines) < 2:
-                continue
-            name = lines[0]
-            if name in seen:
-                continue
-            seen.add(name)
-            price = next((parse_amount(l) for l in lines
-                          if re.search(r"PLN|zł|€|\$|£", l)), None)
-            rating = next((l.split("/")[0] for l in lines
-                           if re.match(r"^\d[.,]\d/5$", l)), None)
-            provider = next((l for l in lines
-                             if l in ("Booking.com", "Expedia", "Agoda",
-                                      "Hotels.com", "Trip.com")), None)
-            out.append({
-                "source": "google",
-                "name": name,
-                "kind": " · ".join(l for l in lines[1:]
-                                   if re.search(r"star|hotel|apartment", l, re.I))[:60],
-                "price_total": None,
-                "price_per_night": price,
-                "price_label": f"{price:.0f} {self.currency}/noc" if price else "",
-                "currency": self.currency,
-                "rating": rating,
-                "provider": provider,
-                "lat": None, "lon": None, "distance_km": None,
-                "link": c.get("href") or url,
-            })
-            if len(out) >= limit:
-                break
-        return out
-
     # ---------- one call for the UI ----------
 
     def for_flight(self, dest_iata: str, checkin: str, checkout: str,
@@ -575,31 +505,31 @@ class Stays:
                                     price_max=hi, lat=ap["lat"], lon=ap["lon"])
 
         booking_url = booking_url_for(price_min, price_max)
-        google_url = self.google_url(city, checkin, checkout, adults)
 
+        # Both sources at once: Airbnb is a single HTTP request, Booking pays
+        # for a browser plus a price-band walk, so in sequence every search
+        # cost the sum of the two for no reason.
+        jobs = {
+            "airbnb": lambda: self.airbnb_search(
+                airbnb_url, (ap["lat"], ap["lon"]), limit, radius_km),
+            "booking": lambda: self.booking_search(
+                booking_url_for, limit, price_min, price_max, bands),
+        }
+        run = [s for s in chosen if s in jobs]
         listings: list[dict] = []
         errors: dict[str, str] = {}
-        if "airbnb" in chosen:
-            try:
-                listings += self.airbnb_search(airbnb_url,
-                                               (ap["lat"], ap["lon"]), limit,
-                                               radius_km)
-            except Exception as e:  # noqa: BLE001 - one source down is not fatal
-                errors["airbnb"] = str(e)[:200]
-        if "booking" in chosen:
-            try:
-                listings += self.booking_search(booking_url_for, limit,
-                                                price_min, price_max, bands)
-            except Exception as e:  # noqa: BLE001
-                errors["booking"] = str(e)[:200]
-        if "google" in chosen:
-            try:
-                listings += self.google_search(google_url, limit)
-            except Exception as e:  # noqa: BLE001
-                errors["google"] = str(e)[:200]
+        if run:
+            with ThreadPoolExecutor(max_workers=len(run)) as pool:
+                futures = {pool.submit(jobs[s]): s for s in run}
+                for fut in futures:
+                    src = futures[fut]
+                    try:
+                        listings += fut.result()
+                    except Exception as e:  # noqa: BLE001 - one source down is not fatal
+                        errors[src] = str(e)[:200]
 
-        # normalise both price views, then apply the nightly range everywhere -
-        # Google has no server-side price filter at all
+        # fill in whichever of the two price views a source did not report,
+        # so every row can be sorted and displayed the same way
         kept = []
         for s in listings:
             per_night = s.get("price_per_night")
@@ -608,15 +538,10 @@ class Stays:
             if s.get("price_total") is None and per_night is not None:
                 s["price_total"] = round(per_night * nights, 2)
             s["price_per_night"] = per_night
-            # Airbnb and Booking filter on price server-side, and their notion of
-            # a nightly rate excludes fees that the displayed total includes -
-            # re-filtering here would throw away rows they already accepted.
-            # Google has no price filter at all, so it gets filtered here.
-            if s["source"] == "google" and per_night is not None:
-                if price_min and per_night < price_min:
-                    continue
-                if price_max and per_night > price_max:
-                    continue
+            # No price re-filtering here: both sources filter on price
+            # server-side, and their notion of a nightly rate excludes fees that
+            # the displayed total includes, so re-checking would throw away rows
+            # they already accepted.
             # Booking reports distance from the city centre rather than the
             # airport, so the radius is applied against that as an approximation
             if (s.get("distance_center_km") is not None
@@ -632,8 +557,7 @@ class Stays:
             "filters": filters, "sources_used": chosen,
             "sources_skipped": skipped,
             "listings": kept, "errors": errors,
-            "links": {"booking": booking_url, "airbnb": airbnb_url,
-                      "google": google_url},
+            "links": {"booking": booking_url, "airbnb": airbnb_url},
         }
 
 
@@ -655,7 +579,7 @@ def main() -> None:
                    help="Booking price bands to walk (depth)")
     p.add_argument("--limit", type=int, default=24)
     p.add_argument("--currency", default="PLN")
-    p.add_argument("--sources", default="airbnb,booking,google")
+    p.add_argument("--sources", default="airbnb,booking")
     p.add_argument("--format", choices=["text", "json"], default="text")
     args = p.parse_args()
 

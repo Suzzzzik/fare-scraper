@@ -150,7 +150,6 @@
   .pprice { font-weight: 700; font-variant-numeric: tabular-nums; }
   .tag.airbnb { color: #ff5a5f; }
   .tag.booking { color: #4a8cff; }
-  .tag.google { color: #34a853; }
   .srcs { font-size: 9px; color: var(--muted); margin-left: 4px; letter-spacing: .5px; }
   th.sorted::after { content: " ↕"; }
   tbody tr:last-child td { border-bottom: 0; }
@@ -563,7 +562,7 @@ function staysForm(i, r) {
     </div>`;
 }
 
-const SOURCE_LABEL = { airbnb: "Airbnb", booking: "Booking", google: "Google" };
+const SOURCE_LABEL = { airbnb: "Airbnb", booking: "Booking" };
 
 // Names/addresses/blurbs come straight from scraped third-party pages and can
 // contain stray "<" from markup the scraper's regex stripper didn't fully
@@ -608,7 +607,7 @@ async function runStays(box, dest) {
   const sources = [...box.querySelectorAll(".s-src:checked")].map(i => i.value);
   const filters = [...box.querySelectorAll(".s-flt:checked")].map(i => i.value);
   if (!sources.length) { area.innerHTML = `<span class="warns">Zaznacz co najmniej jedno źródło.</span>`; return; }
-  area.innerHTML = `<span class="sub">Szukam noclegów (${sources.join(" + ")})… Booking i Google uruchamiają przeglądarkę, pierwsze wyszukanie trwa dłużej.</span>`;
+  area.innerHTML = `<span class="sub">Szukam noclegów w obu serwisach naraz (${sources.join(" + ")})… Booking uruchamia przeglądarkę, więc pierwsze wyszukanie trwa dłużej.</span>`;
 
   const p = new URLSearchParams({
     dest, checkin: val(".s-in"), checkout: val(".s-out"),
@@ -667,7 +666,6 @@ async function runStays(box, dest) {
     <div class="big">
       <a href="${esc(d.links.booking)}" target="_blank" rel="noopener noreferrer">Wszystkie na Booking.com ↗</a>
       <a class="alt" href="${esc(d.links.airbnb)}" target="_blank" rel="noopener noreferrer">Wszystkie na Airbnb ↗</a>
-      <a class="alt" href="${esc(d.links.google)}" target="_blank" rel="noopener noreferrer">Google Hotels ↗</a>
     </div>`;
 }
 
