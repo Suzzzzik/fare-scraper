@@ -14,6 +14,9 @@
   .results-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline;
                   margin: 22px 0 10px; }
   .results-head h2 { font-size: 16px; margin: 0; }
+  /* untyped .tag = the airport badge, next to the source badge */
+  .place .ptop .tag:not([class*=" "]) { color: var(--muted); margin-right: 7px; }
+  .big { flex-wrap: wrap; }
 </style>
 </head>
 <body>
@@ -71,11 +74,13 @@
 
       <div class="span-all">
         <div class="pickhead">
-          <label style="margin:0">Miasto / lotnisko docelowe</label>
-          <span class="picksum" id="destSum">wybierz jedno</span>
+          <label style="margin:0">Miasta / lotniska docelowe</label>
+          <span class="picksum" id="destSum">wybierz co najmniej jedno</span>
+          <button type="button" class="linklike" id="clearDest">wyczyść</button>
         </div>
         <div class="airports chiprow" id="dest"></div>
-        <div class="hint">promień liczony od tego lotniska</div>
+        <div class="hint">można zaznaczyć kilka — np. PMI i IBZ naraz, wyniki
+          w jednej liście. Promień liczony osobno od każdego lotniska.</div>
       </div>
     </div>
 
@@ -113,19 +118,19 @@ function iso(d) { return d.toISOString().slice(0, 10); }
 function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
 
 // ---- destination picker ----------------------------------------------------
-// One airport at a time: /api/stays measures the radius from a single airport,
-// and Booking costs a browser run per search, so multi-select would quietly
-// multiply a 30s search.
+// Several airports at once: each is an independent search that the server runs
+// concurrently, so comparing Palma against Ibiza for the same dates costs about
+// what one of them alone costs rather than the sum.
 
-function destCode() {
-  return $("dest").querySelector("input:checked")?.value || "";
+function destCodes() {
+  return [...$("dest").querySelectorAll("input:checked")].map(i => i.value);
 }
 
 function syncDest() {
-  const chip = $("dest").querySelector("input:checked");
-  $("destSum").textContent = chip
-    ? `wybrano: ${chip.value} — ${chip.dataset.name}`
-    : "wybierz jedno";
+  const picked = destCodes();
+  $("destSum").textContent = picked.length
+    ? `wybrano: ${picked.join(", ")}`
+    : "wybierz co najmniej jedno";
 }
 
 async function loadCountries() {
@@ -144,7 +149,7 @@ async function loadDests() {
     "/api/airports?country=" + encodeURIComponent($("country").value))).json();
   box.innerHTML = list.map(a => `
     <label class="chip">
-      <input type="radio" name="destpick" value="${a.code}" data-name="${esc(a.name)}">
+      <input type="checkbox" value="${a.code}" data-name="${esc(a.name)}">
       <span class="code">${a.code}</span><span class="nm">${esc(a.name)}</span>
     </label>`).join("") || `<span class="picksum">brak lotnisk</span>`;
   syncDest();
@@ -186,10 +191,11 @@ function syncNights() {
 // ---- search ----------------------------------------------------------------
 
 async function search() {
-  const dest = destCode();
+  const picked = destCodes();
+  const dest = picked.join(",");
   const sources = [...document.querySelectorAll(".src:checked")].map(i => i.value);
   const filters = [...document.querySelectorAll(".flt:checked")].map(i => i.value);
-  if (!dest) { $("status").textContent = "Wybierz lotnisko docelowe."; return; }
+  if (!picked.length) { $("status").textContent = "Wybierz co najmniej jedno lotnisko."; return; }
   if (!$("checkin").value || !$("checkout").value) { $("status").textContent = "Podaj daty."; return; }
   if ($("checkout").value <= $("checkin").value) { $("status").textContent = "Wymeldowanie musi być po zameldowaniu."; return; }
   if (!sources.length) { $("status").textContent = "Zaznacz co najmniej jedno źródło."; return; }
@@ -205,7 +211,8 @@ async function search() {
 
   $("go").disabled = true;
   const started = Date.now();
-  $("status").textContent = `Szukam w obu serwisach naraz (${sources.join(" + ")})… Booking uruchamia przeglądarkę, pierwsze wyszukanie trwa dłużej.`;
+  $("status").textContent = `Szukam w ${picked.length > 1 ? picked.length + " lokalizacjach" : picked[0]}`
+    + ` naraz (${sources.join(" + ")})… Booking uruchamia przeglądarkę, pierwsze wyszukanie trwa dłużej.`;
   $("out").innerHTML = "";
 
   let d;
@@ -225,6 +232,8 @@ async function search() {
 }
 
 function renderResults(d) {
+  const airports = d.airports || [d.airport];
+  const multi = airports.length > 1;
   const cheapest = d.listings.reduce(
     (m, s) => (s.price_total && (m === null || s.price_total < m) ? s.price_total : m), null);
 
@@ -234,13 +243,17 @@ function renderResults(d) {
       : (s.price_label || "—");
     const perNight = s.price_per_night
       ? `${Math.round(s.price_per_night).toLocaleString("pl-PL")} ${s.currency}/noc` : "";
-    const km = s.distance_km != null ? `${s.distance_km} km od lotniska`
+    const km = s.distance_km != null ? `${s.distance_km} km od ${s.airport || "lotniska"}`
       : (s.distance_center_km != null ? `~${s.distance_center_km} km od centrum` : "");
     const safeLink = /^https:\/\//.test(s.link || "") ? s.link : "#";
+    // with several destinations in one list, which city a card belongs to is
+    // the first thing you need to know about it
+    const where = multi && s.airport ? `<span class="tag">${esc(s.airport)}</span>` : "";
     return `
       <div class="place">
         <div class="ptop">
-          <span class="tag ${s.source}">${(SOURCE_LABEL[s.source] || s.source).toUpperCase()}</span>
+          <span>${where}<span class="tag ${s.source}">${
+            (SOURCE_LABEL[s.source] || s.source).toUpperCase()}</span></span>
           <span class="pprice ${s.price_total === cheapest ? "best" : ""}">${esc(total)}</span>
         </div>
         <a href="${esc(safeLink)}" target="_blank" rel="noopener noreferrer">${esc(s.name) || "(bez nazwy)"}</a>
@@ -255,23 +268,42 @@ function renderResults(d) {
     .map(([k, why]) => `${SOURCE_LABEL[k] || k} pominięty (brak filtru: ${why.join(", ")})`)
     .join(" · "));
 
+  // how many landed per destination, so an airport that returned nothing is
+  // visibly empty rather than just absent
+  const perAirport = airports.map(a => {
+    const n = d.listings.filter(s => s.airport === a.code).length;
+    return `${a.code} ${n}`;
+  }).join(" · ");
+
+  const byAirport = d.links_by_airport || {};
+  const bigLinks = airports.map(a => {
+    const l = byAirport[a.code] || {};
+    const tag = multi ? `${a.code} — ` : "";
+    return `
+      ${l.booking ? `<a href="${esc(l.booking)}" target="_blank" rel="noopener noreferrer">${tag}Booking.com ↗</a>` : ""}
+      ${l.airbnb ? `<a class="alt" href="${esc(l.airbnb)}" target="_blank" rel="noopener noreferrer">${tag}Airbnb ↗</a>` : ""}`;
+  }).join("");
+
   $("out").innerHTML = `
     <div class="results-head">
       <h2>${d.listings.length} ofert na ${d.nights} nocy</h2>
-      <span class="sub" style="margin:0">w promieniu ${d.radius_km} km od ${esc(d.airport.code)}
+      <span class="sub" style="margin:0">w promieniu ${d.radius_km} km od ${
+        esc(airports.map(a => a.code).join(", ") || d.airport.code)}${
+        multi ? ` (${esc(perAirport)})` : ""}
         · źródła: ${esc(d.sources_used.map(s => SOURCE_LABEL[s]).join(", ")) || "brak"}${
         skipped ? ` · ${skipped}` : ""}</span>
     </div>
     ${errs ? `<div class="warns">${errs}</div>` : ""}
     <div class="places">${cards || "<span class='sub'>Brak ofert dla tych filtrów.</span>"}</div>
-    <div class="stays"><div class="big">
-      <a href="${esc(d.links.booking)}" target="_blank" rel="noopener noreferrer">Wszystkie na Booking.com ↗</a>
-      <a class="alt" href="${esc(d.links.airbnb)}" target="_blank" rel="noopener noreferrer">Wszystkie na Airbnb ↗</a>
-    </div></div>`;
+    <div class="stays"><div class="big">${bigLinks}</div></div>`;
 }
 
 $("country").addEventListener("change", loadDests);
 $("dest").addEventListener("change", syncDest);
+$("clearDest").addEventListener("click", () => {
+  $("dest").querySelectorAll("input:checked").forEach(i => { i.checked = false; });
+  syncDest();
+});
 $("checkin").addEventListener("change", syncNights);
 $("checkout").addEventListener("change", syncNights);
 $("go").addEventListener("click", search);

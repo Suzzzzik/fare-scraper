@@ -170,7 +170,7 @@ API, if you want to drive it directly:
 | `GET /api/airports?country=pl` | airports in a country, flagged by carrier |
 | `GET /api/search?from=pl&to=es&date_from=…&date_to=…&carriers=…&mode=…` | SSE stream: `progress`, `rows`, `warn`, `results`, `done` |
 | `GET /api/stay-filters` | the filter vocabulary and which source supports each entry |
-| `GET /api/stays?dest=BCN&checkin=…&checkout=…` | accommodation, Airbnb + Booking merged |
+| `GET /api/stays?dest=BCN&checkin=…&checkout=…` | accommodation, Airbnb + Booking merged; `dest` accepts several codes (`dest=PMI,IBZ`), searched concurrently |
 
 Pages: `/` is the flight search, `/noclegi` the standalone accommodation search.
 
@@ -211,9 +211,12 @@ matters, or raise the ratio.
 
 Two ways in, one engine behind both:
 
-- **`/noclegi`** — a standalone accommodation search, no flight involved. Pick a country, an
-  airport, dates, and search. Use it when the trip is already booked, or when the stay is the thing
-  being priced.
+- **`/noclegi`** — a standalone accommodation search, no flight involved. Pick a country, **one or
+  several** airports, dates, and search. Use it when the trip is already booked, or when the stay is
+  the thing being priced. Several destinations are searched concurrently and merged into one
+  cheapest-first list, each card badged with the airport it belongs to — so "Palma vs Ibiza vs
+  Alicante for the same week" costs roughly what one of them alone costs (measured on Airbnb:
+  1.0s for one airport, 1.5s for three).
 - **the `noclegi` button on any flight row** — same search, pre-filled from that flight's
   destination and dates.
 

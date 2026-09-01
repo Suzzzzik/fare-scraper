@@ -1193,21 +1193,83 @@ class Handler(BaseHTTPRequestHandler):
         sources = tuple(s for s in (one("sources", ",".join(st.SOURCES)) or "").split(",")
                         if s in st.SOURCES) or st.SOURCES
         filters = [f for f in (one("filters", "") or "").split(",") if f]
-        return self.clients.stays.for_flight(
-            dest_iata=(one("dest") or "").upper(),
-            checkin=one("checkin"),
-            checkout=one("checkout"),
-            radius_km=float(one("radius_km", "30") or 30),
-            adults=int(one("adults", "2") or 2),
-            bedrooms=int(bedrooms) if bedrooms else None,
-            prop_type=one("type", "any") or "any",
-            filters=filters,
-            price_min=float(pmin) if pmin else None,
-            price_max=float(pmax) if pmax else None,
-            limit=int(one("limit", "24") or 24),
-            sources=sources,
-            bands=int(one("bands", "4") or 4),
-        )
+        dests = [d.strip().upper() for d in (one("dest") or "").split(",") if d.strip()]
+        if not dests:
+            return {"error": "dest required"}
+
+        def search(code: str) -> dict:
+            return self.clients.stays.for_flight(
+                dest_iata=code,
+                checkin=one("checkin"),
+                checkout=one("checkout"),
+                radius_km=float(one("radius_km", "30") or 30),
+                adults=int(one("adults", "2") or 2),
+                bedrooms=int(bedrooms) if bedrooms else None,
+                prop_type=one("type", "any") or "any",
+                filters=filters,
+                price_min=float(pmin) if pmin else None,
+                price_max=float(pmax) if pmax else None,
+                limit=int(one("limit", "24") or 24),
+                sources=sources,
+                bands=int(one("bands", "4") or 4),
+            )
+
+        if len(dests) == 1:
+            out = search(dests[0])
+            for s in out["listings"]:
+                s["airport"] = out["airport"]["code"]
+            out["airports"] = [out["airport"]]
+            out["links_by_airport"] = {out["airport"]["code"]: out["links"]}
+            return out
+
+        # Several destinations at once - Palma vs Ibiza vs Alicante for the same
+        # dates. Each is an independent search, so they run concurrently rather
+        # than paying Booking's browser cost once per airport in sequence.
+        results: dict[str, dict] = {}
+        errors: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=min(4, len(dests))) as pool:
+            futures = {pool.submit(search, d): d for d in dests}
+            for fut in futures:
+                code = futures[fut]
+                try:
+                    results[code] = fut.result()
+                except Exception as e:  # noqa: BLE001 - one dead airport is not fatal
+                    errors[code] = str(e)[:200]
+
+        merged: list[dict] = []
+        airports, links_by, used = [], {}, []
+        skipped: dict[str, list[str]] = {}
+        nights = 0
+        for code in dests:              # keep the caller's order, not completion order
+            d = results.get(code)
+            if not d:
+                continue
+            nights = d["nights"]
+            airports.append(d["airport"])
+            links_by[d["airport"]["code"]] = d["links"]
+            for s in d["listings"]:
+                s["airport"] = d["airport"]["code"]
+            merged += d["listings"]
+            for s in d["sources_used"]:
+                if s not in used:
+                    used.append(s)
+            skipped.update(d["sources_skipped"])
+            for k, v in d["errors"].items():
+                errors[f"{k} ({code})"] = v
+
+        merged.sort(key=lambda x: (x["price_total"] is None, x["price_total"] or 0))
+        first = airports[0] if airports else {"code": ",".join(dests), "name": ""}
+        return {
+            "airport": first, "airports": airports,
+            "radius_km": float(one("radius_km", "30") or 30),
+            "nights": nights,
+            "checkin": one("checkin"), "checkout": one("checkout"),
+            "filters": filters, "sources_used": used,
+            "sources_skipped": skipped,
+            "listings": merged, "errors": errors,
+            "links": links_by.get(first["code"], {}),
+            "links_by_airport": links_by,
+        }
 
     def sse_search(self, qs: dict) -> None:
         try:
