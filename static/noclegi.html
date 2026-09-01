@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wyszukiwarka noclegów — Airbnb i Booking.com</title>
+<link rel="stylesheet" href="/app.css">
+<style>
+  /* this page is all results, so the cards get more room than the compact
+     panel embedded under a flight row does */
+  .places { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+  .place { padding: 12px 14px; }
+  .place a { font-weight: 600; }
+  .results-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline;
+                  margin: 22px 0 10px; }
+  .results-head h2 { font-size: 16px; margin: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="nav"><a href="/">Loty</a><a href="/noclegi" class="on">Noclegi</a></nav>
+  <h1>Wyszukiwarka noclegów</h1>
+  <div class="sub">Airbnb i Booking.com przeszukiwane jednocześnie, z prawdziwymi cenami za cały pobyt.
+    Szukaj bez wybierania lotu — wskaż miasto docelowe i daty.</div>
+
+  <div class="panel">
+    <div class="grid">
+      <div>
+        <label for="country">Kraj</label>
+        <select id="country"></select>
+      </div>
+      <div>
+        <label for="checkin">Zameldowanie</label>
+        <input type="date" id="checkin">
+      </div>
+      <div>
+        <label for="checkout">Wymeldowanie</label>
+        <input type="date" id="checkout">
+        <div class="hint" id="nightsHint"></div>
+      </div>
+      <div>
+        <label for="radius">Promień (km)</label>
+        <input type="number" id="radius" value="30" min="1" max="200">
+      </div>
+      <div>
+        <label for="adults">Dorośli</label>
+        <input type="number" id="adults" value="2" min="1" max="16">
+      </div>
+      <div>
+        <label for="bedrooms">Sypialnie</label>
+        <input type="number" id="bedrooms" value="1" min="0" max="10">
+      </div>
+      <div>
+        <label for="type">Rodzaj</label>
+        <select id="type">
+          <option value="any">dowolny</option>
+          <option value="apartment">apartament</option>
+          <option value="hotel">hotel</option>
+          <option value="hostel">hostel</option>
+          <option value="house">dom</option>
+        </select>
+      </div>
+      <div>
+        <label for="minNight">Cena/noc od</label>
+        <input type="number" id="minNight" min="0" step="50" placeholder="brak">
+      </div>
+      <div>
+        <label for="maxNight">Cena/noc do</label>
+        <input type="number" id="maxNight" min="0" step="50" placeholder="brak">
+      </div>
+
+      <div class="span-all">
+        <div class="pickhead">
+          <label style="margin:0">Miasto / lotnisko docelowe</label>
+          <span class="picksum" id="destSum">wybierz jedno</span>
+        </div>
+        <div class="airports chiprow" id="dest"></div>
+        <div class="hint">promień liczony od tego lotniska</div>
+      </div>
+    </div>
+
+    <section style="margin-top:16px">
+      <div class="sectlabel">Źródła</div>
+      <div class="chiprow" id="sources"></div>
+    </section>
+
+    <section style="margin-top:14px">
+      <div class="sectlabel">Filtry</div>
+      <div class="chiprow" id="filters"></div>
+      <div class="hint" id="filterHint"></div>
+    </section>
+
+    <div class="row">
+      <button id="go">Szukaj noclegów</button>
+      <span class="sub" style="margin:0" id="status"></span>
+    </div>
+  </div>
+
+  <div id="out"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const SOURCE_LABEL = { airbnb: "Airbnb", booking: "Booking" };
+let META = null;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+function iso(d) { return d.toISOString().slice(0, 10); }
+function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
+
+// ---- destination picker ----------------------------------------------------
+// One airport at a time: /api/stays measures the radius from a single airport,
+// and Booking costs a browser run per search, so multi-select would quietly
+// multiply a 30s search.
+
+function destCode() {
+  return $("dest").querySelector("input:checked")?.value || "";
+}
+
+function syncDest() {
+  const chip = $("dest").querySelector("input:checked");
+  $("destSum").textContent = chip
+    ? `wybrano: ${chip.value} — ${chip.dataset.name}`
+    : "wybierz jedno";
+}
+
+async function loadCountries() {
+  const list = await (await fetch("/api/countries")).json();
+  $("country").innerHTML = list
+    .map(c => `<option value="${c.code}">${esc(c.name)} (${c.code.toUpperCase()})</option>`)
+    .join("");
+  if (list.some(c => c.code === "es")) $("country").value = "es";
+  await loadDests();
+}
+
+async function loadDests() {
+  const box = $("dest");
+  box.innerHTML = `<span class="picksum">ładowanie…</span>`;
+  const list = await (await fetch(
+    "/api/airports?country=" + encodeURIComponent($("country").value))).json();
+  box.innerHTML = list.map(a => `
+    <label class="chip">
+      <input type="radio" name="destpick" value="${a.code}" data-name="${esc(a.name)}">
+      <span class="code">${a.code}</span><span class="nm">${esc(a.name)}</span>
+    </label>`).join("") || `<span class="picksum">brak lotnisk</span>`;
+  syncDest();
+}
+
+// ---- sources + filters -----------------------------------------------------
+
+async function loadMeta() {
+  META = await (await fetch("/api/stay-filters")).json();
+  $("sources").innerHTML = META.sources.map(s => `
+    <label class="chip"><input type="checkbox" class="src" value="${s}" checked>${
+      SOURCE_LABEL[s] || s}</label>`).join("");
+  $("filters").innerHTML = META.filters.map(f => `
+    <label class="chip" title="obsługują: ${f.sources.map(s => SOURCE_LABEL[s]).join(", ") || "brak"}">
+      <input type="checkbox" class="flt" value="${f.key}">${esc(f.label)}<span class="srcs">${
+        f.sources.map(s => SOURCE_LABEL[s][0]).join("")}</span></label>`).join("");
+  $("filters").addEventListener("change", syncFilterHint);
+  syncFilterHint();
+}
+
+// A source that cannot express every selected filter is skipped rather than
+// queried unfiltered, so say up front which ones will actually run.
+function syncFilterHint() {
+  const picked = [...document.querySelectorAll(".flt:checked")].map(i => i.value);
+  const usable = META.sources.filter(s =>
+    picked.every(k => (META.filters.find(f => f.key === k) || {}).sources.includes(s)));
+  $("filterHint").textContent = picked.length
+    ? `Z tymi filtrami przeszuka: ${usable.map(s => SOURCE_LABEL[s]).join(", ") || "żadne źródło"}`
+    : "Bez filtrów przeszukane zostaną wszystkie zaznaczone źródła.";
+}
+
+function syncNights() {
+  const a = $("checkin").value, b = $("checkout").value;
+  if (!a || !b || b <= a) { $("nightsHint").textContent = ""; return; }
+  const n = Math.round((new Date(b) - new Date(a)) / 86400000);
+  $("nightsHint").textContent = `${n} ${n === 1 ? "noc" : n < 5 ? "noce" : "nocy"}`;
+}
+
+// ---- search ----------------------------------------------------------------
+
+async function search() {
+  const dest = destCode();
+  const sources = [...document.querySelectorAll(".src:checked")].map(i => i.value);
+  const filters = [...document.querySelectorAll(".flt:checked")].map(i => i.value);
+  if (!dest) { $("status").textContent = "Wybierz lotnisko docelowe."; return; }
+  if (!$("checkin").value || !$("checkout").value) { $("status").textContent = "Podaj daty."; return; }
+  if ($("checkout").value <= $("checkin").value) { $("status").textContent = "Wymeldowanie musi być po zameldowaniu."; return; }
+  if (!sources.length) { $("status").textContent = "Zaznacz co najmniej jedno źródło."; return; }
+
+  const p = new URLSearchParams({
+    dest, checkin: $("checkin").value, checkout: $("checkout").value,
+    radius_km: $("radius").value, adults: $("adults").value,
+    bedrooms: $("bedrooms").value, type: $("type").value,
+    sources: sources.join(","), filters: filters.join(","),
+  });
+  if ($("minNight").value) p.set("min_night", $("minNight").value);
+  if ($("maxNight").value) p.set("max_night", $("maxNight").value);
+
+  $("go").disabled = true;
+  const started = Date.now();
+  $("status").textContent = `Szukam w obu serwisach naraz (${sources.join(" + ")})… Booking uruchamia przeglądarkę, pierwsze wyszukanie trwa dłużej.`;
+  $("out").innerHTML = "";
+
+  let d;
+  try {
+    const res = await fetch("/api/stays?" + p.toString());
+    d = await res.json();
+    if (d.error) throw new Error(d.error);
+  } catch (e) {
+    $("status").textContent = "";
+    $("out").innerHTML = `<div class="warns">Nie udało się pobrać: ${esc(e.message)}</div>`;
+    $("go").disabled = false;
+    return;
+  }
+  $("go").disabled = false;
+  $("status").textContent = `Gotowe w ${Math.round((Date.now() - started) / 1000)}s.`;
+  renderResults(d);
+}
+
+function renderResults(d) {
+  const cheapest = d.listings.reduce(
+    (m, s) => (s.price_total && (m === null || s.price_total < m) ? s.price_total : m), null);
+
+  const cards = d.listings.map(s => {
+    const total = s.price_total
+      ? `${Math.round(s.price_total).toLocaleString("pl-PL")} ${s.currency}`
+      : (s.price_label || "—");
+    const perNight = s.price_per_night
+      ? `${Math.round(s.price_per_night).toLocaleString("pl-PL")} ${s.currency}/noc` : "";
+    const km = s.distance_km != null ? `${s.distance_km} km od lotniska`
+      : (s.distance_center_km != null ? `~${s.distance_center_km} km od centrum` : "");
+    const safeLink = /^https:\/\//.test(s.link || "") ? s.link : "#";
+    return `
+      <div class="place">
+        <div class="ptop">
+          <span class="tag ${s.source}">${(SOURCE_LABEL[s.source] || s.source).toUpperCase()}</span>
+          <span class="pprice ${s.price_total === cheapest ? "best" : ""}">${esc(total)}</span>
+        </div>
+        <a href="${esc(safeLink)}" target="_blank" rel="noopener noreferrer">${esc(s.name) || "(bez nazwy)"}</a>
+        <div class="meta">${esc([perNight, s.rating ? "★ " + s.rating : "", km,
+          s.provider ? "przez " + s.provider : "", s.kind].filter(Boolean).join(" · "))}</div>
+      </div>`;
+  }).join("");
+
+  const errs = esc(Object.entries(d.errors || {})
+    .map(([k, v]) => `${SOURCE_LABEL[k] || k}: ${v}`).join(" · "));
+  const skipped = esc(Object.entries(d.sources_skipped || {})
+    .map(([k, why]) => `${SOURCE_LABEL[k] || k} pominięty (brak filtru: ${why.join(", ")})`)
+    .join(" · "));
+
+  $("out").innerHTML = `
+    <div class="results-head">
+      <h2>${d.listings.length} ofert na ${d.nights} nocy</h2>
+      <span class="sub" style="margin:0">w promieniu ${d.radius_km} km od ${esc(d.airport.code)}
+        · źródła: ${esc(d.sources_used.map(s => SOURCE_LABEL[s]).join(", ")) || "brak"}${
+        skipped ? ` · ${skipped}` : ""}</span>
+    </div>
+    ${errs ? `<div class="warns">${errs}</div>` : ""}
+    <div class="places">${cards || "<span class='sub'>Brak ofert dla tych filtrów.</span>"}</div>
+    <div class="stays"><div class="big">
+      <a href="${esc(d.links.booking)}" target="_blank" rel="noopener noreferrer">Wszystkie na Booking.com ↗</a>
+      <a class="alt" href="${esc(d.links.airbnb)}" target="_blank" rel="noopener noreferrer">Wszystkie na Airbnb ↗</a>
+    </div></div>`;
+}
+
+$("country").addEventListener("change", loadDests);
+$("dest").addEventListener("change", syncDest);
+$("checkin").addEventListener("change", syncNights);
+$("checkout").addEventListener("change", syncNights);
+$("go").addEventListener("click", search);
+
+const today = new Date();
+$("checkin").value = iso(addDays(today, 30));
+$("checkout").value = iso(addDays(today, 37));
+syncNights();
+loadMeta().then(loadCountries);
+</script>
+</body>
+</html>

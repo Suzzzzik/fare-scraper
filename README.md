@@ -169,6 +169,10 @@ API, if you want to drive it directly:
 | `GET /api/countries` | merged country list with per-country carrier coverage |
 | `GET /api/airports?country=pl` | airports in a country, flagged by carrier |
 | `GET /api/search?from=pl&to=es&date_from=…&date_to=…&carriers=…&mode=…` | SSE stream: `progress`, `rows`, `warn`, `results`, `done` |
+| `GET /api/stay-filters` | the filter vocabulary and which source supports each entry |
+| `GET /api/stays?dest=BCN&checkin=…&checkout=…` | accommodation, Airbnb + Booking merged |
+
+Pages: `/` is the flight search, `/noclegi` the standalone accommodation search.
 
 ## Narrowing the search
 
@@ -204,6 +208,17 @@ both a 2-hour hop and a long-haul will cut the long-haul. Narrow by destination 
 matters, or raise the ratio.
 
 ## Stays: real listings with prices
+
+Two ways in, one engine behind both:
+
+- **`/noclegi`** — a standalone accommodation search, no flight involved. Pick a country, an
+  airport, dates, and search. Use it when the trip is already booked, or when the stay is the thing
+  being priced.
+- **the `noclegi` button on any flight row** — same search, pre-filled from that flight's
+  destination and dates.
+
+Both pages share `static/app.css` so they cannot drift apart visually, and both call the same
+`/api/stays`.
 
 Every result row has a **noclegi** button. It opens a panel under the flight with the trip dates
 pre-filled (check-out = the return date, or `+7` nights for a one-way) and these controls:

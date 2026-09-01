@@ -1146,6 +1146,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path in ("/", "/index.html"):
                 return self._file(STATIC / "index.html")
+            if u.path in ("/noclegi", "/noclegi.html"):
+                return self._file(STATIC / "noclegi.html")
+            if u.path == "/app.css":
+                # shared stylesheet, so the flights page and the stays page
+                # cannot drift apart visually
+                return self._file(STATIC / "app.css")
             if u.path == "/api/carriers":
                 return self._json([{"key": k, **v} for k, v in CARRIERS.items()])
             if u.path == "/api/countries":
