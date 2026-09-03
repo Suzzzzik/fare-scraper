@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Local web UI for the Ryanair + Wizz Air fare scrapers.
+"""Local web UI and HTTP API over every scraper in this project.
+
+One process, stdlib `http.server` only. It fans a search out across the
+selected carriers concurrently, streams rows back over Server-Sent Events as
+each carrier answers, then emits the deduplicated, single-currency, sorted
+result set. Accommodation search (Airbnb + Booking) is served from the same
+process.
 
 Nothing is hardcoded to Poland or Spain: country lists, airport lists and the
 route graphs all come from the carriers' own reference endpoints at runtime, so
@@ -7,13 +13,22 @@ any origin country / destination country pair the carriers serve can be picked
 in the browser.
 
   python server.py            # http://127.0.0.1:8000
-  python server.py --port 9000 --market pl-pl
+  python server.py --port 9000 --market pl-pl --currency PLN
 
-Endpoints:
-  GET /                        the UI
-  GET /api/countries           merged country list (both carriers)
-  GET /api/airports?country=pl airports in a country, with carrier flags
-  GET /api/search?...          Server-Sent Events: progress + fare rows
+Pages:
+  GET /                        flight search
+  GET /noclegi                 standalone accommodation search
+
+API:
+  GET /api/carriers            registered fare sources (drives the UI checkboxes)
+  GET /api/countries           merged country list, tagged by which sources reach it
+  GET /api/airports?country=pl airports in a country, tagged the same way
+  GET /api/search?...          Server-Sent Events: progress, rows, warn, results, done
+  GET /api/stay-filters        accommodation filter vocabulary and per-source support
+  GET /api/stays?dest=PMI,IBZ  accommodation near one or more airports, merged
+
+Adding a fare source: one entry in CARRIERS plus a matching <name>_rows()
+method on SearchRun. The UI builds itself from /api/carriers.
 """
 
 from __future__ import annotations
@@ -88,7 +103,7 @@ GROUP_CODES = {
 }
 
 
-# ---------------------------------------------------------------- clients
+# ---------- clients ----------
 
 class Clients:
     """Lazily built API clients plus cached reference data."""
@@ -150,7 +165,7 @@ class Clients:
                 self._kw = kw.Kiwi(market=self.market, currency=self.currency)
             return self._kw
 
-    # -- reference data ---------------------------------------------------
+    # ---------- reference data ----------
 
     def countries(self) -> list[dict]:
         if self._countries is not None:
@@ -175,7 +190,7 @@ class Clients:
                                        "carriers": []})
                 if "wizzair" not in e["carriers"]:
                     e["carriers"].append("wizzair")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - one source down must not blank the country list
             traceback.print_exc()
         try:
             # Kiwi knows ~223 countries, far more than the two low-cost carriers
@@ -184,7 +199,7 @@ class Clients:
                                       {"code": c["code"], "name": c["name"],
                                        "carriers": []})
                 e["carriers"].append("kiwi")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - one source down must not blank the country list
             traceback.print_exc()
 
         self._countries = sorted(merged.values(), key=lambda x: x["name"])
@@ -199,12 +214,12 @@ class Clients:
         try:
             for c in self.wizzair.cities():
                 out[c["iata"]] = c["shortName"]
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - one source down must not blank the name map
             traceback.print_exc()
         try:
             for a in self.ryanair.airports():
                 out[a["code"]] = a["name"]  # Ryanair names win where both exist
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - one source down must not blank the name map
             traceback.print_exc()
         self._names = out
         return out
@@ -224,7 +239,7 @@ class Clients:
                 merged.setdefault(a["code"], {"code": a["code"],
                                               "name": a["name"],
                                               "carriers": []})["carriers"].append("ryanair")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - one source down must not blank the airport list
             traceback.print_exc()
         try:
             for c in self.wizzair.cities(country):
@@ -232,7 +247,7 @@ class Clients:
                                                   "name": c["shortName"],
                                                   "carriers": []})
                 e["carriers"].append("wizzair")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - one source down must not blank the airport list
             traceback.print_exc()
         try:
             for a in self.kiwi.airports(country):
@@ -240,7 +255,7 @@ class Clients:
                                                   "name": a["name"],
                                                   "carriers": []})
                 e["carriers"].append("kiwi")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - one source down must not blank the airport list
             traceback.print_exc()
         out = sorted(merged.values(), key=lambda x: x["code"])
         with self._lock:
@@ -248,7 +263,7 @@ class Clients:
         return out
 
 
-# ---------------------------------------------------------------- search
+# ---------- search ----------
 
 def _row(carrier, origin, dest, day, price, currency, link, *,
          origin_name="", dest_name="", times="", flight_number="",
@@ -367,7 +382,7 @@ class SearchRun:
             self._total += n
             self.emit("progress", {"done": self._done, "total": self._total})
 
-    # -- shared -----------------------------------------------------------
+    # ---------- shared ----------
 
     @property
     def display_currency(self) -> str:
@@ -386,7 +401,7 @@ class SearchRun:
         hi = p["nights"] + p["nights_tol"]
         return p["date_from"] + timedelta(days=lo), p["date_to"] + timedelta(days=hi)
 
-    # -- Ryanair ----------------------------------------------------------
+    # ---------- Ryanair ----------
 
     def ryanair_rows(self) -> list[dict]:
         api = self.c.ryanair
@@ -404,7 +419,7 @@ class SearchRun:
                 try:
                     pairs += [(o, d) for d in api.destinations_in(o, p["to"])
                               if not wanted_dests or d in wanted_dests]
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001 - one origin with no routes must not abort the search
                     self.emit("warn", {"carrier": "ryanair",
                                        "message": f"routes {o}: {e}"})
             jobs = [(o, d, m) for o, d in pairs
@@ -517,7 +532,7 @@ class SearchRun:
                 rows += res
         return rows
 
-    # -- Wizz Air ---------------------------------------------------------
+    # ---------- Wizz Air ----------
 
     def wizzair_rows(self) -> list[dict]:
         api = self.c.wizzair
@@ -614,7 +629,7 @@ class SearchRun:
                 rows += res
         return rows
 
-    # -- LOT --------------------------------------------------------------
+    # ---------- LOT ----------
 
     def lot_rows(self) -> list[dict]:
         api = self.c.lot
@@ -652,7 +667,7 @@ class SearchRun:
                 rows += res
         return rows
 
-    # -- Lufthansa ----------------------------------------------------------
+    # ---------- Lufthansa ----------
 
     def lufthansa_rows(self) -> list[dict]:
         """Each origin-dest pair costs several real browser navigations (see
@@ -698,7 +713,7 @@ class SearchRun:
                 rows += res
         return rows
 
-    # -- China Airlines -------------------------------------------------
+    # ---------- China Airlines ----------
 
     def chinaairlines_rows(self) -> list[dict]:
         """Same shape as lufthansa_rows above - a handful of explicit pairs,
@@ -740,7 +755,7 @@ class SearchRun:
                 rows += res
         return rows
 
-    # -- Kiwi.com (everything else) ---------------------------------------
+    # ---------- Kiwi.com (everything else) ----------
 
     def easyjet_rows(self) -> list[dict]:
         return self._kiwi_backed("easyjet", include=EASYJET_CODES)
@@ -786,7 +801,7 @@ class SearchRun:
 
         return self._guard(work, carrier)(None)
 
-    # -- combos: two separate one-way tickets stitched into one trip --------
+    # ---------- combos: two separate one-way tickets stitched into one trip ----------
 
     def _legs_in_direction(self, frm: str, to: str, origins: list[str],
                            dests: list[str],
@@ -945,7 +960,7 @@ class SearchRun:
             self.emit("rows", {"rows": rows})
         return rows
 
-    # -- plumbing ---------------------------------------------------------
+    # ---------- plumbing ----------
 
     def _to_display(self, r: dict) -> bool:
         """Restate one row in `display_currency` in place. False (and the row
@@ -1009,7 +1024,7 @@ class SearchRun:
         def runner(name, fn):
             try:
                 results[name] = fn()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 - one dead carrier must not kill the run
                 results[name] = []
                 self.emit("warn", {"carrier": name, "message": str(e)[:300]})
 
@@ -1052,7 +1067,7 @@ class SearchRun:
         self.emit("done", {"count": len(rows), "dropped_over_ratio": dropped})
 
 
-# ---------------------------------------------------------------- HTTP
+# ---------- HTTP ----------
 
 def parse_params(qs: dict) -> dict:
     def one(k, default=None):
@@ -1116,7 +1131,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter console
         sys.stderr.write("  %s\n" % (fmt % args))
 
-    # -- helpers ----------------------------------------------------------
+    # ---------- helpers ----------
 
     def _json(self, payload, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode()
@@ -1138,7 +1153,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # -- routes -----------------------------------------------------------
+    # ---------- routes ----------
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
         u = urlparse(self.path)
@@ -1173,7 +1188,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/search":
                 return self.sse_search(qs)
             return self._json({"error": "not found"}, 404)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - any handler error becomes a JSON 500, not a dropped socket
             traceback.print_exc()
             try:
                 self._json({"error": str(e)}, 500)
@@ -1274,7 +1289,7 @@ class Handler(BaseHTTPRequestHandler):
     def sse_search(self, qs: dict) -> None:
         try:
             params = parse_params(qs)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - a bad query string is the client's fault: 400
             return self._json({"error": f"bad params: {e}"}, 400)
 
         self.send_response(200)
@@ -1291,7 +1306,7 @@ class Handler(BaseHTTPRequestHandler):
         def worker():
             try:
                 SearchRun(self.clients, params, emit).run()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 - surface the failure to the client as an SSE error event
                 traceback.print_exc()
                 emit("error", {"message": str(e)})
             finally:

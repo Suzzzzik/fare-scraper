@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Kiwi.com fare scraper - every airline, not just the two with open APIs.
+"""Kiwi.com fare scraper - the aggregator behind every airline not scraped directly.
 
-Ryanair and Wizz Air publish their own fare endpoints; almost nobody else does
-(easyJet, Norwegian, Vueling, Volotea, Eurowings, Transavia, LOT and friends all
-sit behind Akamai/Cloudflare bot management). Kiwi.com's own website API is the
-practical way to reach the rest: one GraphQL endpoint, no key, and it returns the
-operating carrier for every result.
+Ryanair, Wizz Air, LOT, Lufthansa and China Airlines have their own scrapers in
+this project; almost nobody else can be reached at the source (easyJet,
+Norwegian, Vueling, Volotea, Eurowings, Transavia and friends all sit behind
+Akamai/Cloudflare bot management). Kiwi.com's own website API is the practical
+way to reach the rest: one GraphQL endpoint, no key, and it returns the
+operating carrier for every result. The server excludes the directly-scraped
+airlines' codes from the Kiwi query, so it only ever adds what they cannot.
 
   POST https://api.skypicker.com/umbrella/v2/graphql
         onewayItineraries(search: SearchOnewayInput, ...)

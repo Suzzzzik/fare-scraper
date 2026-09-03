@@ -1,2 +1,8 @@
-requests>=2.31
-curl_cffi>=0.7
+# Core - every scraper and the web UI.
+requests>=2.31          # Wizz Air client (plain HTTP works there)
+curl_cffi>=0.7          # TLS fingerprint impersonation: Ryanair, LOT, Kiwi, Airbnb, Booking, FX rates
+
+# Optional - only the sources listed need them. Everything else works without.
+#   playwright>=1.45    # Booking.com (mints the AWS WAF token once, then curl_cffi)
+#   patchright>=1.45    # Lufthansa and China Airlines (drives a real Chrome tab past
+#                       # Cloudflare / Akamai+Imperva+DataDome). Then: patchright install chrome

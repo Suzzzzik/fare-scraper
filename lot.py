@@ -321,7 +321,7 @@ def cmd_scan(api: Lot, args) -> None:
         for i, fut in enumerate(as_completed(futs), 1):
             try:
                 fares += fut.result()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 - one failed route must not abort the scan
                 print(f"  ! {futs[fut]}: {e}", file=sys.stderr)
             if not args.quiet:
                 print(f"\rroutes: {i}/{len(futs)}", end="", file=sys.stderr,

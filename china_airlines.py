@@ -94,7 +94,7 @@ class ChinaAirlines:
         self._from_shown = ""
         self._from_code = ""
 
-    # ---------- worker thread (owns every Playwright object) --------------
+    # ---------- worker thread (owns every Playwright object) ----------
 
     def _ensure_worker(self) -> None:
         with self._worker_lock:
@@ -112,7 +112,7 @@ class ChinaAirlines:
             fn, fut = item
             try:
                 fut.set_result(fn())
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 - the worker must survive any one job failing
                 fut.set_exception(e)
 
     def _call(self, fn):
@@ -121,7 +121,7 @@ class ChinaAirlines:
         self._task_q.put((fn, fut))
         return fut.result()
 
-    # ---------- browser lifecycle (patchright, real Chrome, one tab) ------
+    # ---------- browser lifecycle (patchright, real Chrome, one tab) ----------
     # everything below this point only ever runs on the worker thread
 
     def _ensure_page(self):
@@ -160,7 +160,7 @@ class ChinaAirlines:
             self._worker.join(timeout=10)
             self._worker = None
 
-    # ---------- one search = one real UI-driven interaction ----------------
+    # ---------- one search = one real UI-driven interaction ----------
 
     def _pick_airport(self, label_text: str, query: str, code: str) -> None:
         page = self._page
@@ -194,7 +194,7 @@ class ChinaAirlines:
                 page.wait_for_timeout(1200)
                 try:
                     page.get_by_role("button", name=re.compile("Accept", re.I)).click(timeout=2000)
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001 - the cookie banner is not always shown
                     pass
                 self._from_shown = "Los Angeles (Los Angeles)"
                 self._from_code = "LAX"
@@ -246,7 +246,7 @@ class ChinaAirlines:
         for text in captured:
             try:
                 out += json.loads(text).get("data") or []
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - one unparsable capture must not drop the rest
                 continue
         return out
 
@@ -254,7 +254,7 @@ class ChinaAirlines:
                back: date | None = None) -> list[dict]:
         return self._call(lambda: self._search_on_worker(origin, dest, depart, back))
 
-    # ---------- fares -------------------------------------------------
+    # ---------- fares ----------
 
     def booking_link(self) -> str:
         return WWW
@@ -318,7 +318,7 @@ class ChinaAirlines:
         return list(out.values())
 
 
-# ---------- CLI (smoke test) -------------------------------------------
+# ---------- CLI (smoke test) ----------
 
 def main() -> None:
     import argparse

@@ -387,7 +387,7 @@ def cmd_calendar(api: Ryanair, args) -> None:
     for o in origins:
         try:
             pairs += [(o, d) for d in api.destinations_in(o, args.to_country)]
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - one origin with no routes must not abort the scan
             print(f"  ! routes {o}: {e}", file=sys.stderr)
     if not args.quiet:
         print(f"{len(pairs)} routes to {args.to_country.upper()}", file=sys.stderr)

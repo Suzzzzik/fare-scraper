@@ -98,7 +98,7 @@ class Lufthansa:
         self._browser = None
         self._page = None
 
-    # ---------- worker thread (owns every Playwright object) --------------
+    # ---------- worker thread (owns every Playwright object) ----------
 
     def _ensure_worker(self) -> None:
         with self._worker_lock:
@@ -118,7 +118,7 @@ class Lufthansa:
             fn, fut = item
             try:
                 fut.set_result(fn())
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 - the worker must survive any one job failing
                 fut.set_exception(e)
 
     def _call(self, fn):
@@ -127,7 +127,7 @@ class Lufthansa:
         self._task_q.put((fn, fut))
         return fut.result()
 
-    # ---------- browser lifecycle (patchright, real Chrome, one tab) ------
+    # ---------- browser lifecycle (patchright, real Chrome, one tab) ----------
     # everything below this point only ever runs on the worker thread
 
     def _ensure_page(self):
@@ -160,7 +160,7 @@ class Lufthansa:
             self._worker.join(timeout=10)
             self._worker = None
 
-    # ---------- one search = one navigation --------------------------------
+    # ---------- one search = one navigation ----------
 
     def _search_on_worker(self, body: dict) -> list[dict]:
         """POSTs `body` as the site's own auto-submit form does, and returns
@@ -197,7 +197,7 @@ class Lufthansa:
         for text in captured:
             try:
                 out += json.loads(text).get("data") or []
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - one unparsable capture must not drop the rest
                 continue
         return out
 
@@ -225,7 +225,7 @@ class Lufthansa:
         }
         return self._search(body)
 
-    # ---------- fares -------------------------------------------------
+    # ---------- fares ----------
 
     def booking_link(self) -> str:
         # The real results page only opens via a same-origin POST-submitted
@@ -306,7 +306,7 @@ class Lufthansa:
         return list(out.values())
 
 
-# ---------- CLI (smoke test) -------------------------------------------
+# ---------- CLI (smoke test) ----------
 
 def main() -> None:
     import argparse
