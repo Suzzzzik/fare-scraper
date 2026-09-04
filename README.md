@@ -18,10 +18,43 @@ any Polish airport to anywhere in Spain*, *out on Wizz Air and back on Ryanair i
 *Two-ticket combos (tagged **2 BILETY**), open-jaw returns (GDN → MAD → KTW), mixed airlines
 (Ryanair out, Wizz Air back), every total in one currency with the per-leg split underneath.*
 
+## Engineering highlights
+
+The interesting work is not the scraping, it is what had to be reverse-engineered, measured or
+debugged to make it correct and fast. Each item links to the section with the evidence.
+
+- **Five airline backends reverse-engineered from their own sites**, each with a non-obvious
+  requirement discovered by inspection rather than documentation: a header that must echo a cookie
+  ([Wizz Air](#wizz-air-wizzairpy)), request fields that must be strings not numbers or the API
+  returns a misleading 500 ([LOT](#lot-lotpy)), an `IataCode` parameter whose wrong spelling yields
+  a wrong error message ([Ryanair](#ryanair-ryanairpy)).
+- **Bot protection handled by evidence, not folklore.** Cloudflare, Akamai, Imperva and DataDome
+  each got the approach that measurement showed works — and the ones that didn't are written down
+  with why ([Lufthansa](#lufthansa-lufthansapy), [China Airlines](#china-airlines-china_airlinespy),
+  [easyJet](#which-airlines-can-be-scraped-directly-and-which-cannot)). Reliability went from
+  0 of 3 to 3 of 3 by adding a one-line stall diagnostic first and fixing what it showed.
+- **A currency bug that produced confidently wrong totals** — 179 PLN + 29.99 EUR reported as
+  "208.99 PLN" — fixed at the one choke point every row passes through, with an offline test that
+  pins it ([One currency](#one-currency-fxpy)).
+- **Two order-of-magnitude speedups by measuring instead of assuming**: rate limiters set from
+  fear of throttling were the entire wall time. Wizz Air 110 s → 14.6 s, LOT 26.3 s → 4.2 s, same
+  results ([Performance notes](#performance-notes)).
+- **Concurrency done where it pays**: carriers in parallel, both combo directions at once, both
+  accommodation sources at once, several destinations at once — and a thread-affinity bug in a
+  browser driver fixed with a dedicated worker thread rather than a lock
+  ([China Airlines](#china-airlines-china_airlinespy)).
+- **Search features a single airline site cannot offer**: mixed-airline and open-jaw trips built
+  from independently priced legs, weekday filtering that wraps the week, a relative price cap
+  ([Search features](#search-features)).
+
+The UI is in Polish (it was built for a Polish user); code, comments and this document are in
+English.
+
 ---
 
 ## Contents
 
+- [Engineering highlights](#engineering-highlights)
 - [What it does](#what-it-does)
 - [Quick start](#quick-start)
 - [Architecture](#architecture)
@@ -35,6 +68,7 @@ any Polish airport to anywhere in Spain*, *out on Wizz Air and back on Ryanair i
 - [Command line](#command-line)
 - [Performance notes](#performance-notes)
 - [Limitations, politeness, legal](#limitations-politeness-legal)
+- [Development](#development)
 - [Project layout](#project-layout)
 
 ---
