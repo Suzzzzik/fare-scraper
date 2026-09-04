@@ -49,15 +49,19 @@ Requires `patchright` (`pip install patchright && patchright install chrome`).
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
 import json
 import queue
+import random
 import re
 import sys
 import threading
-import uuid
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
+
+from browser import launch_persistent as _launch_persistent
 
 API_CALENDARS_PATH = "/v2/search/air-calendars"
 WWW = "https://www.china-airlines.com/us/en"
@@ -93,6 +97,8 @@ class ChinaAirlines:
         self._page = None
         self._from_shown = ""
         self._from_code = ""
+        self._last_end = 0.0      # monotonic time the previous search finished
+        self._app_seen = False    # did the results app make any API call at all
 
     # ---------- worker thread (owns every Playwright object) ----------
 
@@ -101,6 +107,8 @@ class ChinaAirlines:
             if self._worker is None:
                 self._worker = threading.Thread(target=self._worker_loop, daemon=True)
                 self._worker.start()
+                # see lufthansa.py: an orphaned Chrome keeps the profile locked
+                atexit.register(self.close)
 
     def _worker_loop(self) -> None:
         # see the matching comment in lufthansa.py's Lufthansa._worker_loop
@@ -130,11 +138,10 @@ class ChinaAirlines:
         from patchright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch_persistent_context(
-            user_data_dir=f"/tmp/ci_patchright_{uuid.uuid4().hex[:8]}",
-            channel="chrome", headless=False,
-            viewport={"width": 1280, "height": 900},
-        )
+        # Never persistent here: DataDome/Imperva reputation sticks to the
+        # profile, and one that has tripped des-portal's gate keeps failing
+        # while a fresh one passes (measured 0/3 vs 3/3). See browser.py.
+        self._browser = _launch_persistent(self._pw, "china-airlines", persistent=False)
         self._page = self._browser.new_page()
         self._page.goto(WWW, wait_until="domcontentloaded", timeout=20000)
         self._page.wait_for_timeout(1500)
@@ -152,6 +159,19 @@ class ChinaAirlines:
         if self._pw is not None:
             self._pw.stop()
         self._page = self._browser = self._pw = None
+
+    def _relaunch(self) -> None:
+        """Throw the whole context away and start a fresh one.
+
+        A stall on des-portal is the gate having scored *this* profile; a
+        plain `goto` back to the landing page carries every cookie that
+        scored it along for the ride. A new profile arrives with no history,
+        which is the configuration that passes."""
+        try:
+            self._close()
+        except Exception:  # noqa: BLE001 - a wedged tab must not block the relaunch
+            self._page = self._browser = self._pw = None
+        self._ensure_page()
 
     def close(self) -> None:
         if self._worker is not None:
@@ -175,12 +195,70 @@ class ChinaAirlines:
     def _search_on_worker(self, origin: str, dest: str, depart: date,
                           back: date | None = None) -> list[dict]:
         """Fills the real search widget and returns every air-calendars
-        response the resulting page load triggered."""
+        response the resulting page load triggered.
+
+        One retry from a fresh landing page: the flakiest failure here is the
+        trip stalling on Akamai's "processing your request" interstitial at
+        bookingportal.china-airlines.com and never reaching the results host.
+        A second attempt from a clean start almost always goes through - the
+        first one has by then earned the session cookies the second rides on."""
         self._ensure_page()
+        # Human cadence between searches. The observed failure mode is not the
+        # Akamai interstitial but des-portal's behavioural gate: three widget
+        # passes inside ~40s and the results app stops calling its API. A
+        # randomised 4-7s gap between passes keeps the profile looking like
+        # a person comparing dates rather than a script sweeping them.
+        gap = random.uniform(4.0, 7.0) - (time.monotonic() - self._last_end)
+        if gap > 0:
+            self._page.wait_for_timeout(int(gap * 1000))
+        try:
+            captured = self._fill_and_submit(origin, dest, depart, back, wait_s=45.0)
+            if not captured:
+                self._note_stall("first attempt")
+                # give the gate a moment, then come back as a brand-new
+                # visitor: a fresh profile, not this one's cookies revisited
+                time.sleep(random.uniform(5.0, 8.0))
+                self._relaunch()
+                captured = self._fill_and_submit(origin, dest, depart, back, wait_s=60.0)
+                if not captured:
+                    self._note_stall("retry")
+        finally:
+            self._last_end = time.monotonic()
+
+        out = []
+        for text in captured:
+            try:
+                out += json.loads(text).get("data") or []
+            except Exception:  # noqa: BLE001 - one unparsable capture must not drop the rest
+                continue
+        return out
+
+    def _note_stall(self, when: str) -> None:
+        """Where the tab ended up when a search produced nothing - the one
+        line that tells a challenge loop, an Akamai interstitial and a plain
+        "no flights" apart, without which every empty result looks alike."""
+        try:
+            url, title = self._page.url, self._page.title()
+        except Exception:  # noqa: BLE001 - the tab may be mid-navigation
+            url, title = "?", "?"
+        # "app booted" = the results SPA made at least one call to its own
+        # API. Booted-but-no-calendar is the behavioural gate on des-portal;
+        # never-booted is a challenge page or the Akamai interstitial.
+        print(f"warn: china airlines: no calendar response on {when}; "
+              f"app booted: {'yes' if self._app_seen else 'no'}; "
+              f"tab at {url[:90]} ({title[:40]})", file=sys.stderr)
+
+    def _fill_and_submit(self, origin: str, dest: str, depart: date,
+                         back: date | None, wait_s: float) -> list[str]:
+        """One pass through the widget; returns the raw air-calendars bodies
+        it triggered, waiting only until the first one lands."""
         page = self._page
         captured: list[str] = []
+        self._app_seen = False
 
         def on_response(resp):
+            if "api-des.china-airlines.com/v2/" in resp.url:
+                self._app_seen = True
             if resp.request.method == "POST" and API_CALENDARS_PATH in resp.url:
                 try:
                     captured.append(resp.text())
@@ -233,22 +311,25 @@ class ChinaAirlines:
                 page.get_by_role("button", name="Next").click(timeout=4000)
             except Exception:  # noqa: BLE001 - only appears for near-term dates
                 pass
-            # the trip sometimes routes through Akamai's own interstitial
-            # "processing your request" page before the real results page
-            for _ in range(6):
-                page.wait_for_timeout(5000)
-                if captured or "des-portal.china-airlines.com" in page.url:
+            # The trip sometimes routes through Akamai's own "processing your
+            # request" interstitial before the real results host. Poll for
+            # the calendar response rather than sleeping in 5s steps: a fast
+            # run returns in ~2s instead of 5, a slow one gets the full budget.
+            started = time.monotonic()
+            deadline = started + wait_s
+            while not captured and time.monotonic() < deadline:
+                page.wait_for_timeout(250)
+                # If the results app has not made a single API call by 20s it
+                # is not going to: the tab is on a challenge page or the
+                # interstitial. Bail to the retry instead of burning the rest
+                # of the budget - this is what turned one stalled search into
+                # a four-minute one.
+                if not self._app_seen and time.monotonic() - started > 20.0:
                     break
+            page.wait_for_timeout(400)   # a second calendar call can follow the first
         finally:
             page.remove_listener("response", on_response)
-
-        out = []
-        for text in captured:
-            try:
-                out += json.loads(text).get("data") or []
-            except Exception:  # noqa: BLE001 - one unparsable capture must not drop the rest
-                continue
-        return out
+        return captured
 
     def _search(self, origin: str, dest: str, depart: date,
                back: date | None = None) -> list[dict]:

@@ -101,6 +101,7 @@ static/app.css      shared styles     ├──────►  server.py  ─�
 | `kiwi.py` | **every remaining airline** | Kiwi.com's website GraphQL API |
 | `stays.py` | hotels and apartments near an airport, with prices | Airbnb + Booking.com, scraped concurrently |
 | `fx.py` | currency conversion | ECB reference rates, cached daily |
+| `browser.py` | launcher shared by the two browser-backed scrapers | persistent patchright profile, throwaway fallback |
 
 **Request flow.** `server.py` parses the query into one params dict, then `SearchRun` starts one
 thread per selected carrier. Each carrier's `<name>_rows()` fans its own routes out over a thread
@@ -263,6 +264,24 @@ Lufthansa out across a whole country's airports the way the HTTP-only scrapers d
 explicit origins the user picked (or the country's primary airport) against the picked or primary
 destination, capped to a handful of pairs.
 
+Three things make it pass every time rather than most times (the launcher lives in `browser.py`;
+the polling and retry are mirrored in China Airlines):
+
+- **The Chrome profile persists across restarts** (`~/.cache/fare-scraper/lufthansa-profile`).
+  Cloudflare binds `cf_clearance` to the browser that earned it, so a returning profile skips the
+  challenge on the first search — measured 3 of 3 through the CLI and 3 of 3 through the server
+  (8 s cold, 5 s warm). A locked profile (a CLI run while the server is up) falls back to a
+  throwaway one rather than failing. This is the one place where persistence helps; for China
+  Airlines it turned out to hurt, see below.
+- **Wait for the response, not for a timer.** A fixed 3 s sleep after navigation was both too slow
+  (it always paid the full 3 s) and too fragile (a calendar response landing at 3.5 s was silently
+  missed and the search came back empty). The tab is polled every 250 ms and returns the moment
+  the first `air-calendars` body arrives — which also catches the SPA's second calendar call, so a
+  WAW → BCN search now returns 8 priced days instead of 4.
+- **One retry from the search page.** The first navigation after a fresh challenge occasionally
+  lands on the challenge itself and yields nothing; by then the clearance cookie is set, so an
+  identical second submit goes straight through.
+
 ### China Airlines (`china_airlines.py`)
 
 Same backend family as Lufthansa (an Amadeus "one-booking" tenant at `api-des.china-airlines.com`,
@@ -279,9 +298,39 @@ React's handlers — so the module skips the calendar entirely and types into th
 turned out to be a plain text input that accepts `.fill()`. Dates within a few days of "today"
 trigger an extra confirmation gate; searching two weeks out avoids it.
 
-Noticeably flakier than Lufthansa: it sometimes routes through Akamai's own "processing your
-request" interstitial, and repeated rapid runs from one profile visibly escalate scrutiny. A failed
-pair yields no rows rather than raising.
+This is the harder of the two. With a fresh profile on every start, three consecutive LAX → TPE
+round-trip runs returned **nothing at all** (39–63 s each). The three Lufthansa fixes got it to
+2 of 3; the one-line stall diagnostic (`warn: … tab at <url>`) then showed the remaining failure
+was *not* the Akamai interstitial at `bookingportal.china-airlines.com` — the tab had reached the
+results host at `des-portal.china-airlines.com`, and the results app simply never called its API.
+That is des-portal's behavioural gate reacting to three widget passes inside ~40 s. Two more
+changes, aimed at exactly that:
+
+- **Human cadence.** A randomised 4–7 s gap between consecutive searches, and a 5–8 s pause before
+  a retry, so the profile looks like someone comparing dates rather than a script sweeping them.
+- **Bail early when the app never boots.** The response listener also notes whether the results
+  app made *any* call to `api-des.china-airlines.com`. If it has not within 20 s it never will —
+  the tab is on a challenge page or the interstitial — so the search moves to its retry instead of
+  burning the full 45 s budget. This is what had turned one stalled search into a four-minute one.
+
+Result: **3 of 3 runs, 3 fares each, 54–59 s per round-trip search** (three stay lengths, one
+widget pass each). The diagnostic line stays: when a search does come back empty it says whether
+the app booted and where the tab ended up, which is the one fact that tells a challenge loop, an
+interstitial and a plain "no flights" apart. A failed pair yields no rows rather than raising.
+
+Two findings from those runs, both the opposite of what worked for Lufthansa:
+
+- **Profile persistence is harmful here.** The 3-of-3 series happened to run on throwaway profiles
+  (the persistent one was held by an earlier process). Re-run on the persistent profile that an
+  earlier stalled search had already tripped the gate with, the same code went 0 of 3 at ~200 s
+  each: DataDome/Imperva reputation *sticks to the profile*. So China Airlines starts from a fresh
+  profile every process, and a stall mid-process is answered by throwing the whole context away
+  and relaunching as a new visitor — not by a `goto` back to the landing page, which carries every
+  cookie that scored badly along for the ride. Lufthansa keeps its persistent profile: measured
+  3 of 3 with it, and its Cloudflare clearance is worth keeping.
+- **An orphaned Chrome keeps a persistent profile locked**, and every later run then silently
+  degrades. Both modules now close their browser on interpreter exit (`atexit`), and `browser.py`
+  recognises a lock whose owning pid is dead and clears it rather than honouring it.
 
 **Thread affinity.** Playwright's sync API must be driven from the thread that created it, but the
 server dispatches each carrier on a fresh thread per search. Both browser-backed modules therefore
@@ -466,6 +515,24 @@ was spending ~35 s asleep in the limiter alone. It now runs six workers behind a
 backs off exponentially on an actual `429`/`503`, permanently widening that run's interval — a run
 that is pushed back slows down, a run that is not stays fast.
 
+LOT had the same disease, one search later. On a plain four-carrier return search (WAW → Spain,
+7 ± 2 nights) LOT alone accounted for the entire wall time:
+
+| carrier | one-way | return |
+|---|---|---|
+| Ryanair | 0.3 s | 0.3 s |
+| Wizz Air | 2.3 s | 2.5 s |
+| Kiwi | 0.9 s | 1.0 s |
+| LOT, before | 3.5 s | **26.3 s** |
+| LOT, after | 1.2 s | **4.2 s** |
+
+A return search there is one seed call plus up to 14 fixed-departure re-queries per route, all
+serialised behind a 0.4 s global gap. Measured, lot.com takes 24 such requests eight-at-a-time in
+1.1 s with no `429`/`503`. The gap is now nominal, the re-queries run in a pool, throttling is
+handled reactively, and a `400 {"code":"39360","title":"NO FLIGHT FOUND"}` is treated as the data
+it is (no service that day) rather than an error. The whole four-carrier return search went from
+26.1 s to 5.7 s with identical results.
+
 ## Limitations, politeness, legal
 
 - Prices from Kiwi are Kiwi's. Prices from the browser-backed carriers are the airline's, but the
@@ -506,6 +573,7 @@ china_airlines.py    China Airlines, same pattern, heavier bot-protection stack
 kiwi.py              Kiwi.com GraphQL client + CLI
 stays.py             Airbnb + Booking.com accommodation search + CLI
 fx.py                ECB rate table, daily cache, safe conversion helpers
+browser.py           persistent-profile Chrome launcher shared by lufthansa.py and china_airlines.py
 static/index.html    flight search UI
 static/noclegi.html  standalone accommodation search UI
 static/app.css       shared stylesheet

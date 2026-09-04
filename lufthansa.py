@@ -48,14 +48,17 @@ Requires `patchright` (`pip install patchright && patchright install chrome`).
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
 import json
 import queue
 import sys
 import threading
-import uuid
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
+
+from browser import launch_persistent as _launch_persistent
 
 API_CALENDARS_PATH = "/one-booking/v2/search/air-calendars"
 SHOP = "https://shop.lufthansa.com"
@@ -105,6 +108,11 @@ class Lufthansa:
             if self._worker is None:
                 self._worker = threading.Thread(target=self._worker_loop, daemon=True)
                 self._worker.start()
+                # A daemon worker dies with the process, but the Chrome it
+                # launched does not - an orphaned Chrome keeps the persistent
+                # profile locked and pushes every later run onto a throwaway
+                # one. Close on interpreter exit no matter how the CLI ends.
+                atexit.register(self.close)
 
     def _worker_loop(self) -> None:
         # Playwright's sync API needs a running event loop on this thread;
@@ -136,11 +144,7 @@ class Lufthansa:
         from patchright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch_persistent_context(
-            user_data_dir=f"/tmp/lh_patchright_{uuid.uuid4().hex[:8]}",
-            channel="chrome", headless=False,
-            viewport={"width": 1280, "height": 900},
-        )
+        self._browser = _launch_persistent(self._pw, "lufthansa")
         self._page = self._browser.new_page()
         self._page.goto(f"{WWW}/{self.lang}/en/flight-search",
                         wait_until="domcontentloaded", timeout=20000)
@@ -162,10 +166,10 @@ class Lufthansa:
 
     # ---------- one search = one navigation ----------
 
-    def _search_on_worker(self, body: dict) -> list[dict]:
-        """POSTs `body` as the site's own auto-submit form does, and returns
-        every air-calendars response the resulting page load triggered."""
-        self._ensure_page()
+    def _submit_once(self, body: dict, wait_s: float) -> list[str]:
+        """One form-post navigation; returns the raw air-calendars bodies it
+        triggered. Waits only as long as it has to: it returns the moment the
+        first calendar response lands, and gives up after `wait_s`."""
         captured: list[str] = []
 
         def on_response(resp):
@@ -188,10 +192,38 @@ class Lufthansa:
                 }""",
                 [target, json.dumps(body)],
             )
-            self._page.wait_for_load_state("load", timeout=20000)
-            self._page.wait_for_timeout(3000)
+            try:
+                self._page.wait_for_load_state("load", timeout=20000)
+            except Exception:  # noqa: BLE001 - a challenge loop never fires "load"; the poll below decides
+                pass
+            # A fixed sleep here was both too slow (it always paid the full
+            # 3s) and too fragile (a calendar response arriving at 3.5s was
+            # silently missed and the search came back empty). Poll instead.
+            deadline = time.monotonic() + wait_s
+            while not captured and time.monotonic() < deadline:
+                self._page.wait_for_timeout(250)
+            # the SPA may fire a second calendar call right after the first
+            self._page.wait_for_timeout(400)
         finally:
             self._page.remove_listener("response", on_response)
+        return captured
+
+    def _search_on_worker(self, body: dict) -> list[dict]:
+        """POSTs `body` as the site's own auto-submit form does, and returns
+        every air-calendars response the resulting page load triggered.
+
+        One retry: the first navigation after a fresh challenge occasionally
+        lands on the challenge page itself and yields nothing. By then the
+        clearance cookie is set, so a second identical submit goes straight
+        through - re-arming from the search page first, as the site itself
+        would."""
+        self._ensure_page()
+        captured = self._submit_once(body, wait_s=15.0)
+        if not captured:
+            self._page.goto(f"{WWW}/{self.lang}/en/flight-search",
+                            wait_until="domcontentloaded", timeout=20000)
+            self._page.wait_for_timeout(800)
+            captured = self._submit_once(body, wait_s=25.0)
 
         out = []
         for text in captured:

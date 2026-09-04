@@ -81,8 +81,14 @@ class RateLimiter:
 
 
 class Lot:
-    def __init__(self, market: str = "pl-pl", rate: float = 0.4,
+    def __init__(self, market: str = "pl-pl", rate: float = 0.05,
                  timeout: int = 40):
+        # `rate` used to be 0.4s, which alone made a return search take ~26s:
+        # the seed call plus up to 14 fixed-departure re-queries per route,
+        # all serialised behind one global gap. Measured, lot.com does not
+        # throttle at this volume - 24 requests eight-at-a-time complete in
+        # 1.1s with no 429/503 - so the gap is now nominal and `prices()`
+        # backs off only when the server actually pushes back.
         parts = market.split("-")
         self.language = parts[0].lower()
         self.market_code = parts[-1].lower()
@@ -174,6 +180,17 @@ class Lot:
                f"&tripType={trip_type}"
                f"&fixedDepartureDate={'true' if fixed_departure else 'false'}")
         r = self.session.get(url, headers=self._headers(), timeout=self.timeout)
+        # react to throttling rather than pre-empting it (see __init__)
+        for attempt in range(3):
+            if r.status_code not in (429, 503):
+                break
+            self.limiter.min_interval = min(5.0, max(self.limiter.min_interval, 2.0 * 2 ** attempt))
+            time.sleep(2.0 * 2 ** attempt)
+            r = self.session.get(url, headers=self._headers(), timeout=self.timeout)
+        # a route with no service on that date is data, not a failure - LOT
+        # reports it as 400 {"errors":[{"code":"39360","title":"NO FLIGHT FOUND"}]}
+        if r.status_code == 400 and "39360" in r.text:
+            return []
         if r.status_code >= 400:
             raise RuntimeError(f"HTTP {r.status_code} {origin}-{dest} :: "
                                f"{r.text[:160]}")
@@ -223,9 +240,7 @@ class Lot:
         seed.sort(key=lambda p: p["price"])
         lo, hi = max(0, nights - nights_tol), nights + nights_tol
 
-        out = []
-        for p in seed[:max_departures]:
-            dep = date.fromisoformat(p["departureDate"])
+        def best_for(dep: date) -> Fare | None:
             best = None
             for q in self.prices(origin, dest, dep, "R", fixed_departure=True):
                 back = q.get("returnDate")
@@ -235,18 +250,25 @@ class Lot:
                 if lo <= gap <= hi and (best is None or q["price"] < best["price"]):
                     best = q
             if best is None:
-                continue
+                return None
             price = best["price"] / 100.0
             if max_price is not None and price > max_price:
-                continue
+                return None
             back = best["returnDate"]
-            out.append(Fare(
+            return Fare(
                 origin=origin, dest=dest, departure=dep.isoformat(),
                 price=price, currency=best["currency"], total_price=price,
                 date_back=back,
                 nights=(date.fromisoformat(back) - dep).days,
-                link=self.booking_link(origin, dest, dep.isoformat(), back)))
-        return out
+                link=self.booking_link(origin, dest, dep.isoformat(), back))
+
+        # the re-queries are independent of each other, so they run together
+        # rather than one after another behind the limiter
+        deps = [date.fromisoformat(p["departureDate"]) for p in seed[:max_departures]]
+        if not deps:
+            return []
+        with ThreadPoolExecutor(max_workers=min(8, len(deps))) as pool:
+            return [f for f in pool.map(best_for, deps) if f is not None]
 
 
 # ---------- CLI ----------
@@ -345,7 +367,7 @@ def cmd_scan(api: Lot, args) -> None:
 def main() -> None:
     g = argparse.ArgumentParser(add_help=False)
     g.add_argument("--market", default="pl-pl")
-    g.add_argument("--rate", type=float, default=0.4)
+    g.add_argument("--rate", type=float, default=0.05)
     g.add_argument("--workers", type=int, default=4)
     g.add_argument("--format", choices=["csv", "json"], default="csv")
     g.add_argument("--out")

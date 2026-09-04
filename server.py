@@ -662,7 +662,9 @@ class SearchRun:
             ) for f in fares]
 
         rows: list[dict] = []
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        # measured: lot.com takes 24 requests eight-at-a-time in 1.1s with no
+        # throttling, and the client backs off on an actual 429/503
+        with ThreadPoolExecutor(max_workers=8) as pool:
             for res in pool.map(self._guard(work, "lot"), pairs):
                 rows += res
         return rows
