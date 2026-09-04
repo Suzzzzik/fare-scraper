@@ -285,31 +285,35 @@ class Stays:
     # ---------- Booking.com ----------
 
     def _booking_cookies(self, force: bool = False) -> dict:
+        # The whole mint runs under the lock, not just the cache read/write:
+        # the price bands fetch concurrently and each may ask for cookies, and
+        # two threads launching Playwright at once would open two browsers.
+        # Holding the lock across the ~5s mint makes the first thread mint
+        # while the rest wait and reuse the fresh cookie.
         with self._lock:
             if not force and self._bk_cookies:
                 return self._bk_cookies
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as e:
-            raise RuntimeError(
-                "Booking needs a browser for its AWS WAF challenge - "
-                "run `pip install playwright` (uses your system Chrome)") from e
+            try:
+                from playwright.sync_api import sync_playwright
+            except ImportError as e:
+                raise RuntimeError(
+                    "Booking needs a browser for its AWS WAF challenge - "
+                    "run `pip install playwright` (uses your system Chrome)") from e
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(channel="chrome", headless=True)
-            ctx = browser.new_context(locale="en-GB")
-            page = ctx.new_page()
-            page.goto("https://www.booking.com/", wait_until="domcontentloaded",
-                      timeout=self.timeout * 1000)
-            page.wait_for_timeout(5000)
-            cookies = {c["name"]: c["value"]
-                       for c in ctx.cookies("https://www.booking.com")}
-            browser.close()
-        if "aws-waf-token" not in cookies:
-            raise RuntimeError("booking.com did not hand out a WAF token")
-        with self._lock:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(channel="chrome", headless=True)
+                ctx = browser.new_context(locale="en-GB")
+                page = ctx.new_page()
+                page.goto("https://www.booking.com/", wait_until="domcontentloaded",
+                          timeout=self.timeout * 1000)
+                page.wait_for_timeout(5000)
+                cookies = {c["name"]: c["value"]
+                           for c in ctx.cookies("https://www.booking.com")}
+                browser.close()
+            if "aws-waf-token" not in cookies:
+                raise RuntimeError("booking.com did not hand out a WAF token")
             self._bk_cookies = cookies
-        return cookies
+            return cookies
 
     def booking_url(self, city: str, checkin: str, checkout: str,
                     adults: int = 2, rooms: int = 1,
@@ -455,18 +459,31 @@ class Stays:
         else:
             ranges = [(price_min, price_max)]
 
+        # The bands are independent price-sorted queries sharing one cached
+        # WAF cookie, so they fetch concurrently instead of one after another -
+        # the band walk was the whole of Booking's ~30s. Mint the cookie once
+        # up front (serially, under the lock) so the workers don't race to
+        # launch a browser each.
+        if len(ranges) > 1:
+            self._booking_cookies()
+
         seen: dict[str, dict] = {}
-        errors = []
-        for lo, hi in ranges:
+        errors: list[str] = []
+
+        def fetch_band(rng: tuple) -> list[dict]:
+            lo, hi = rng
             try:
-                html = self._booking_fetch(make_url(lo, hi))
+                return self._booking_parse(self._booking_fetch(make_url(lo, hi)), limit)
             except Exception as e:  # noqa: BLE001 - one band failing is survivable
                 errors.append(str(e)[:120])
-                continue
-            for row in self._booking_parse(html, limit):
-                key = row["link"] or row["name"]
-                if key not in seen:
-                    seen[key] = row
+                return []
+
+        with ThreadPoolExecutor(max_workers=min(4, len(ranges))) as pool:
+            for rows in pool.map(fetch_band, ranges):
+                for row in rows:
+                    key = row["link"] or row["name"]
+                    seen.setdefault(key, row)
+
         if not seen and errors:
             raise RuntimeError(errors[0])
         return list(seen.values())

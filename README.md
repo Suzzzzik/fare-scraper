@@ -86,8 +86,9 @@ English.
   tolerance), a hard price cap, and a relative cap ("only fares within 150 % of the cheapest").
 - **Accommodation with real prices** near the destination airport — Airbnb and Booking.com searched
   concurrently, one shared filter vocabulary, and a source that cannot honour a selected filter is
-  skipped rather than queried unfiltered. Reachable from any flight row, or standalone at
-  `/noclegi` for one or several destinations at once.
+  skipped rather than queried unfiltered. Two ways in: **standalone at `/noclegi`** for any cities
+  and any period with no flight involved (one or several destinations at once), or the **noclegi
+  button on any flight row**, pre-filled with that flight's destination and dates.
 - **Live UI** over Server-Sent Events, sortable, filterable, CSV export, every row linking to the
   carrier's own booking page.
 
@@ -393,9 +394,22 @@ implicitly for non-main threads.
 
 ### Stays (`stays.py`)
 
+Two ways to reach it, one engine behind both: **standalone at `/noclegi`** for any cities and any
+dates with no flight involved, or the **noclegi button on any flight row**, pre-filled with that
+flight's destination and dates. `/noclegi` also takes several destinations at once.
+
 Two sources, searched **at the same time** — Airbnb is one fast HTTP request while Booking pays for
 a browser plus a band walk, so in sequence every search cost the sum of both. Measured on
-Barcelona / 25 km: Airbnb alone 1.2 s, Booking alone 30.1 s, both together 30.1 s.
+Barcelona / 25 km: Airbnb alone 1.2 s, so the whole stays search costs whatever Booking costs.
+
+Booking's own cost is its band walk, and the four bands used to run one after another. They are
+independent price-sorted queries sharing one cached WAF cookie, so they now **fetch concurrently**:
+a single warm band fetch is ~3.7 s, and four in a pool finish in about that when the cookie holds,
+versus ~15–25 s serialised. The residual variance is Booking itself — it intermittently answers the
+cookie-reuse with the WAF challenge again, and each such band re-mints the token (a ~5 s browser
+launch, serialised under a lock so concurrent bands never launch a storm of browsers). So a
+cooperating run is single-digit seconds and a re-minting one is ~20–25 s; it is browser-gated, not
+a guaranteed fast path.
 
 **Airbnb** — results ship as JSON inside `<script id="data-deferred-state-0">`; one `curl_cffi`
 request. The radius is exact: airport coordinates plus the requested km become a map bounding box
@@ -406,11 +420,12 @@ listing is re-checked against the true haversine distance.
 are lazy-rendered. The hybrid that works: **Playwright opens booking.com once with the system Chrome,
 the browser solves the challenge, and the resulting `aws-waf-token` cookie is reused for `curl_cffi`
 fetches**, which come back fully server-rendered with prices. The browser starts at most once per
-process; a stale token triggers exactly one re-mint. Booking's search ignores `offset`, so a naive
-scrape only ever sees the first 25 results by relevance — depth comes from **price-band walking**:
-the nightly range is split into bands (`nflt=price=PLN-min-max-1`) queried with `order=price`,
-merged and deduplicated. On the case that prompted it (Barcelona, 1 adult, pool, 20 km) the
-cheapest found went from 3838 PLN to 819 PLN.
+process (the mint is lock-guarded so concurrent bands share one launch). Booking's search ignores
+`offset`, so a naive scrape only ever sees the first 25 results by relevance — depth comes from
+**price-band walking**: the nightly range is split into bands (`nflt=price=PLN-min-max-1`) queried
+with `order=price`, merged and deduplicated (the bands are what run concurrently, above). On the
+case that prompted it (Barcelona, 1 adult, pool, 20 km) the cheapest found went from 3838 PLN to
+819 PLN.
 
 **One filter vocabulary.** `FILTERS` in `stays.py` says how each source expresses each filter, or
 `None` when it cannot:
