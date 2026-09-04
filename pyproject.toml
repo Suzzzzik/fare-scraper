@@ -29,4 +29,8 @@ ignore = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# the modules under test live at the repo root, not in a package; a bare
+# `pytest` (as CI runs it) does not put the cwd on sys.path the way
+# `python -m pytest` does
+pythonpath = ["."]
 addopts = "-q"
