@@ -43,7 +43,7 @@ import json
 import sys
 import threading
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import date
 
 from curl_cffi import requests as cr

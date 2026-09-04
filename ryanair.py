@@ -31,11 +31,11 @@ import argparse
 import csv
 import json
 import sys
-import time
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict, field
-from datetime import date, datetime, timedelta
+from dataclasses import asdict, dataclass
+from datetime import date, timedelta
 
 import requests
 from requests.adapters import HTTPAdapter

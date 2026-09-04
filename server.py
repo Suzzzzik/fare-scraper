@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import china_airlines as ca
 import fx

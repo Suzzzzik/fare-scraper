@@ -1,0 +1,32 @@
+[project]
+name = "fare-scraper"
+version = "1.0.0"
+description = "Flight and accommodation search over the airlines' own booking backends - no fare API, no keys."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.31",
+    "curl_cffi>=0.7",
+]
+
+[project.optional-dependencies]
+# Sources that need a real browser. Everything else works without them.
+booking = ["playwright>=1.45"]
+lufthansa = ["patchright>=1.45"]   # also China Airlines; then: patchright install chrome
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+# `%`-formatting is deliberate in the two places it appears: GraphQL query
+# templates full of braces, and regex sources built with re.escape().
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

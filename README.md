@@ -9,7 +9,14 @@ Built to answer questions the airlines' own sites make awkward: *cheapest week i
 any Polish airport to anywhere in Spain*, *out on Wizz Air and back on Ryanair if that is cheaper*,
 *fly out of Gdańsk and back into Poznań*, *leave on a Sunday or Monday, whichever is cheaper*.
 
-Python 3.12+ · MIT
+[![CI](https://github.com/Suzzzzik/fare-scraper/actions/workflows/ci.yml/badge.svg)](https://github.com/Suzzzzik/fare-scraper/actions/workflows/ci.yml)
+![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
+![Flight search results: two-ticket combos, open-jaw returns, mixed airlines, one currency](docs/flights.png)
+
+*Two-ticket combos (tagged **2 BILETY**), open-jaw returns (GDN → MAD → KTW), mixed airlines
+(Ryanair out, Wizz Air back), every total in one currency with the per-leg split underneath.*
 
 ---
 
@@ -400,6 +407,8 @@ airports, dates. Several destinations are searched concurrently and merged into 
 list, each card badged with its airport — Palma vs Ibiza vs Alicante for the same week costs about
 what one alone costs (Airbnb: 1.0 s for one airport, 1.5 s for three).
 
+![Stays search: Palma and Ibiza in one list, each card badged with its airport](docs/stays.png)
+
 ## HTTP API
 
 | Endpoint | Purpose |
@@ -469,6 +478,22 @@ that is pushed back slows down, a run that is not stays fast.
   with any airline or booking site, and using it may conflict with their terms of service. Check
   before relying on it for anything beyond finding a cheap week away.
 
+## Development
+
+```bash
+.venv/bin/pip install ".[dev]"
+.venv/bin/ruff check .
+.venv/bin/pytest
+```
+
+The test suite is **offline by design** — nothing in `tests/` opens a socket. It pins down the pure
+logic that decides what a user sees: leg pairing inside the stay window, cheapest-per-route
+deduplication (including why an open-jaw return airport and a mixed-airline pairing count as
+distinct routes), currency totals with an injected rate table, weekday expansion across the week
+boundary, query parsing, price-string parsing, geometry and price-band construction. The scrapers
+themselves are exercised against live sites through their CLIs; CI (`.github/workflows/ci.yml`)
+runs lint and tests on Python 3.12 and 3.13 and never touches an airline.
+
 ## Project layout
 
 ```
@@ -484,7 +509,11 @@ fx.py                ECB rate table, daily cache, safe conversion helpers
 static/index.html    flight search UI
 static/noclegi.html  standalone accommodation search UI
 static/app.css       shared stylesheet
+tests/test_core.py   offline unit tests for the pairing, dedupe, currency and parsing logic
+pyproject.toml       metadata, optional extras, ruff and pytest configuration
 requirements.txt     core dependencies; optional browser drivers documented inline
+.github/workflows/   CI: ruff + pytest on 3.12 and 3.13
+docs/                README screenshots
 ```
 
 ## License
