@@ -51,6 +51,7 @@ import math
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from urllib.parse import quote, urlencode
@@ -284,14 +285,22 @@ class Stays:
 
     # ---------- Booking.com ----------
 
-    def _booking_cookies(self, force: bool = False) -> dict:
-        # The whole mint runs under the lock, not just the cache read/write:
-        # the price bands fetch concurrently and each may ask for cookies, and
-        # two threads launching Playwright at once would open two browsers.
-        # Holding the lock across the ~5s mint makes the first thread mint
-        # while the rest wait and reuse the fresh cookie.
+    def _booking_cookies(self, stale: dict | None = None,
+                         url: str | None = None) -> dict:
+        """Cookies that get past Booking's AWS WAF, minting them if needed.
+
+        `stale` is the cookie dict a caller just got rejected with. A re-mint
+        happens only if the cache still holds *that* dict - if another band
+        already re-minted, the caller simply takes the fresh one. Without this
+        the four concurrent price bands each re-minted in turn after one
+        rejection, serialised under the lock: 4 x ~7s, which was the whole of
+        Booking's ~30s.
+
+        The whole mint runs under the lock so two threads never launch two
+        browsers; the others wait and reuse the fresh cookie.
+        """
         with self._lock:
-            if not force and self._bk_cookies:
+            if self._bk_cookies and (stale is None or self._bk_cookies is not stale):
                 return self._bk_cookies
             try:
                 from playwright.sync_api import sync_playwright
@@ -304,11 +313,21 @@ class Stays:
                 browser = p.chromium.launch(channel="chrome", headless=True)
                 ctx = browser.new_context(locale="en-GB")
                 page = ctx.new_page()
-                page.goto("https://www.booking.com/", wait_until="domcontentloaded",
-                          timeout=self.timeout * 1000)
-                page.wait_for_timeout(5000)
-                cookies = {c["name"]: c["value"]
-                           for c in ctx.cookies("https://www.booking.com")}
+                # Earn the token on the page it will be spent on, and wait for
+                # the cookie itself rather than a fixed 5s: the challenge takes
+                # anywhere from ~1s to ~8s, so a fixed sleep both over-waited
+                # the fast case and, on a slow one, returned before the token
+                # existed ("booking.com did not hand out a WAF token").
+                page.goto(url or "https://www.booking.com/",
+                          wait_until="domcontentloaded", timeout=self.timeout * 1000)
+                cookies: dict = {}
+                deadline = time.monotonic() + 12.0
+                while time.monotonic() < deadline:
+                    cookies = {c["name"]: c["value"]
+                               for c in ctx.cookies("https://www.booking.com")}
+                    if "aws-waf-token" in cookies:
+                        break
+                    page.wait_for_timeout(250)
                 browser.close()
             if "aws-waf-token" not in cookies:
                 raise RuntimeError("booking.com did not hand out a WAF token")
@@ -399,17 +418,26 @@ class Stays:
         return html_mod.unescape(re.sub(r"\s+", " ", text)).strip()
 
     def _booking_fetch(self, url: str) -> str:
-        for attempt in (0, 1):
-            cookies = self._booking_cookies(force=bool(attempt))
+        cookies: dict | None = None
+        for _attempt in (0, 1):
+            # first pass: whatever is cached (minting on the very first call);
+            # second pass: re-mint only if nobody else has since our rejection
+            cookies = self._booking_cookies(stale=cookies, url=url)
             s = cr.Session(impersonate="chrome")
             for k, v in cookies.items():
                 s.cookies.set(k, v, domain=".booking.com")
             r = s.get(url, headers={"Accept-Language": "en-GB,en;q=0.9"},
                       timeout=self.timeout)
-            if r.status_code == 200 and "property-card" in r.text:
+            # Tell the challenge apart from a genuine empty result page: a
+            # price band with nothing in it (0-45 PLN/night in Barcelona) is a
+            # 200 with no property cards, not a rejection - re-minting on it
+            # cost two extra browser launches per search. The challenge is a
+            # 202 tagged with x-amzn-waf-action; every real page also embeds
+            # the awswaf challenge.js, so the body is no signal.
+            challenged = (r.status_code == 202
+                          or r.headers.get("x-amzn-waf-action") == "challenge")
+            if r.status_code == 200 and not challenged:
                 return r.text
-            with self._lock:
-                self._bk_cookies = None
         raise RuntimeError("booking.com kept returning the WAF challenge")
 
     def _booking_parse(self, html: str, limit: int) -> list[dict]:

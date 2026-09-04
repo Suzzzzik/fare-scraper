@@ -36,8 +36,9 @@ debugged to make it correct and fast. Each item links to the section with the ev
 - **A currency bug that produced confidently wrong totals** — 179 PLN + 29.99 EUR reported as
   "208.99 PLN" — fixed at the one choke point every row passes through, with an offline test that
   pins it ([One currency](#one-currency-fxpy)).
-- **Two order-of-magnitude speedups by measuring instead of assuming**: rate limiters set from
-  fear of throttling were the entire wall time. Wizz Air 110 s → 14.6 s, LOT 26.3 s → 4.2 s, same
+- **Three order-of-magnitude speedups by measuring instead of assuming**: rate limiters set from
+  fear of throttling, blind sleeps and a serialised band walk were the entire wall time. Wizz Air
+  110 s → 14.6 s, LOT 26.3 s → 4.2 s, Booking.com stays 30 s → 3.3 s cold / 1.3 s warm, same
   results ([Performance notes](#performance-notes)).
 - **Concurrency done where it pays**: carriers in parallel, both combo directions at once, both
   accommodation sources at once, several destinations at once — and a thread-affinity bug in a
@@ -402,14 +403,30 @@ Two sources, searched **at the same time** — Airbnb is one fast HTTP request w
 a browser plus a band walk, so in sequence every search cost the sum of both. Measured on
 Barcelona / 25 km: Airbnb alone 1.2 s, so the whole stays search costs whatever Booking costs.
 
-Booking's own cost is its band walk, and the four bands used to run one after another. They are
-independent price-sorted queries sharing one cached WAF cookie, so they now **fetch concurrently**:
-a single warm band fetch is ~3.7 s, and four in a pool finish in about that when the cookie holds,
-versus ~15–25 s serialised. The residual variance is Booking itself — it intermittently answers the
-cookie-reuse with the WAF challenge again, and each such band re-mints the token (a ~5 s browser
-launch, serialised under a lock so concurrent bands never launch a storm of browsers). So a
-cooperating run is single-digit seconds and a re-minting one is ~20–25 s; it is browser-gated, not
-a guaranteed fast path.
+Booking's own cost is its band walk, and it used to be ~30 s for three separate reasons, each
+fixed on its own (Barcelona / 25 km / 2 adults, `sources=booking`, measured through `/api/stays`):
+
+| change | cold (first search in a process) | warm |
+|---|---|---|
+| baseline: bands serialised, blind 5 s mint sleep | ~30 s | ~15–25 s |
+| four price bands fetched concurrently | ~12 s | ~4 s |
+| mint waits for the cookie instead of sleeping 5 s | 6.6 s → 1.4 s mint | — |
+| re-mint only if nobody has since; empty band ≠ challenge | **3.3 s** | **1.2–1.5 s** |
+
+- The four bands are independent price-sorted queries sharing one WAF cookie, so they run in a
+  pool instead of one after another.
+- The token mint polled a fixed 5 s; the challenge takes 1–8 s, so it both over-waited and
+  occasionally returned before the cookie existed. It now polls the cookie jar (12 s cap).
+- A rejected band re-minted, serialised under the lock, so one rejection cost four browser
+  launches in a row. Now a re-mint happens only if the cache still holds the cookie that was
+  rejected; the other bands just take the fresh one.
+- An empty band (0–45 PLN/night in Barcelona) is a real `200` with no cards. It was read as a
+  challenge and re-minted twice per search. The challenge is a `202` tagged
+  `x-amzn-waf-action: challenge`; the body is no signal, because every real page embeds the
+  `awswaf` challenge script too.
+
+With Airbnb searched alongside, a whole stays search is now 1.5 s warm, and three destinations at
+once (`dest=BCN,MAD,LIS`) 1.7 s.
 
 **Airbnb** — results ship as JSON inside `<script id="data-deferred-state-0">`; one `curl_cffi`
 request. The radius is exact: airport coordinates plus the requested km become a map bounding box
@@ -581,6 +598,10 @@ serialised behind a 0.4 s global gap. Measured, lot.com takes 24 such requests e
 handled reactively, and a `400 {"code":"39360","title":"NO FLIGHT FOUND"}` is treated as the data
 it is (no service that day) rather than an error. The whole four-carrier return search went from
 26.1 s to 5.7 s with identical results.
+
+Stays had the same shape of problem — a serialised band walk, a blind sleep and a re-mint
+storm — and went from ~30 s to 3.3 s cold / 1.3 s warm; the table is in the [Stays](#stays-stayspy)
+section.
 
 ## Limitations, politeness, legal
 
