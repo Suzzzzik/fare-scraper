@@ -1,9 +1,0 @@
-LICENSE
-README.md
-pyproject.toml
-fare_scraper.egg-info/PKG-INFO
-fare_scraper.egg-info/SOURCES.txt
-fare_scraper.egg-info/dependency_links.txt
-fare_scraper.egg-info/requires.txt
-fare_scraper.egg-info/top_level.txt
-tests/test_core.py
