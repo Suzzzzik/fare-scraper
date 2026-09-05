@@ -1104,8 +1104,8 @@ def parse_params(qs: dict) -> dict:
         "weekdays": expand_weekdays(weekdays, weekday_tol),
         "weekdays_picked": weekdays,
         "weekday_tol": weekday_tol,
-        # drop anything priced above cheapest * this, so one 1400 zl outlier
-        # doesn't sit in a list of 174 zl fares. None = keep everything.
+        # drop anything priced above cheapest * this, so one 1400 PLN outlier
+        # doesn't sit in a list of 174 PLN fares. None = keep everything.
         "max_ratio": float(max_ratio) if max_ratio else None,
         "return_dests": return_dests,
         # naming an explicit return airport implies open-jaw is wanted

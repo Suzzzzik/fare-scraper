@@ -454,8 +454,8 @@ def main() -> None:
     g.add_argument("--market", default="pl-pl")
     g.add_argument("--api-url", help="override be.wizzair.com API base")
     g.add_argument("--rate", type=float, default=0.15,
-                   help="min seconds between requests (default 1.5 - the API "
-                        "throttles hard, lower it at your own risk)")
+                   help="min seconds between requests (default 0.15 - the "
+                        "client backs off on its own if the API pushes back)")
     g.add_argument("--workers", type=int, default=2)
     g.add_argument("--format", choices=["csv", "json"], default="csv")
     g.add_argument("--out", help="output file (default: stdout)")
