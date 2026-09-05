@@ -23,11 +23,6 @@ The two run concurrently: Airbnb is one fast HTTP request while Booking pays
 for a browser plus a band walk, so running them in sequence meant every search
 cost Airbnb's time *plus* Booking's for no reason.
 
-Google Hotels used to be a third source and was dropped: it exposes no
-URL-addressable filters at all, so every filter had to be applied on this side
-after the fact, and it needed a second Playwright browser run to get results
-that Booking already covers.
-
 FILTERS below is the shared vocabulary. Each entry says how a source expresses
 that filter, or None when it cannot. A source that cannot express every selected
 filter is skipped rather than silently returning unfiltered results - so ticking
